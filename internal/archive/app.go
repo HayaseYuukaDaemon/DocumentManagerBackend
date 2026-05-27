@@ -39,16 +39,16 @@ func (a *App) RegisterStorage(storage storage.ObjectStore) {
 	a.storages[storage.StorageName()] = storage
 }
 
-func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocumentInput) (*documents.Document, error) {
+func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocumentInput) (documents.Document, error) {
 	if input.Source == "" {
-		return nil, errors.New("source is required")
+		return documents.Document{}, errors.New("source is required")
 	}
 	if len(input.SourceDocumentID) == 0 {
-		return nil, errors.New("source_document_id is required")
+		return documents.Document{}, errors.New("source_document_id is required")
 	}
 
 	if _, err := a.getSource(input.Source); err != nil {
-		return nil, err
+		return documents.Document{}, err
 	}
 
 	storageBackend := input.StorageBackend
@@ -56,7 +56,7 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 		storageBackend = a.defaultStorage
 	}
 	if _, err := a.getStorage(storageBackend); err != nil {
-		return nil, err
+		return documents.Document{}, err
 	}
 
 	document := documents.Document{
@@ -66,18 +66,18 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 		StorageBackend:   storageBackend,
 		ArchiveStatus:    documents.StatusQueued,
 	}
-	return a.documents.Create(ctx, &document)
+	return a.documents.Create(ctx, document)
 }
 
-func (a *App) GetDocument(ctx context.Context, id int) (*documents.Document, error) {
+func (a *App) GetDocument(ctx context.Context, id int) (documents.Document, error) {
 	return a.documents.Get(ctx, id)
 }
 
-func (a *App) GetPage(ctx context.Context, document *documents.Document, pageIndex int) (PageResult, error) {
+func (a *App) GetPage(ctx context.Context, document documents.Document, pageIndex int) (PageResult, error) {
 	return PageResult{}, nil
 }
 
-func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]*documents.Document, error) {
+func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
 	switch input.Mode {
 	case documents.QueryBySourceDocumentID:
 		var params documents.QueryBySourceDocumentIDParams
@@ -88,13 +88,13 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 		if err != nil {
 			return nil, err
 		}
-		return []*documents.Document{document}, nil
+		return []documents.Document{document}, nil
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}
 }
 
-func (a *App) RemoveDocument(ctx context.Context, id int) (*documents.Document, error) {
+func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, error) {
 	return a.documents.Remove(ctx, id)
 }
 
@@ -127,7 +127,7 @@ func (a *App) processQueued(ctx context.Context) {
 	}
 }
 
-func (a *App) processDocument(ctx context.Context, document *documents.Document) (*documents.Document, error) {
+func (a *App) processDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
 	handler, err := a.getSource(document.Source)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
@@ -176,7 +176,7 @@ func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStor
 	return objectStorage, nil
 }
 
-func (a *App) failDocument(ctx context.Context, document *documents.Document, cause error) (*documents.Document, error) {
+func (a *App) failDocument(ctx context.Context, document documents.Document, cause error) (documents.Document, error) {
 	document.ArchiveStatus = documents.StatusFailed
 	document.Error = cause.Error()
 	updated, err := a.documents.Update(ctx, document)

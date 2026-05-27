@@ -34,7 +34,6 @@ type Document struct {
 	Progress         Progress            `json:"progress"`
 	Error            string              `json:"error,omitempty"`
 	PageCount        int                 `json:"page_count,omitempty"`
-	ManifestKey      string              `json:"manifest_key,omitempty"`
 	Removed          bool                `json:"removed"`
 	CreatedAt        time.Time           `json:"created_at"`
 	UpdatedAt        time.Time           `json:"updated_at"`

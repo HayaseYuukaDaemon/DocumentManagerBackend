@@ -43,5 +43,5 @@ type PageResult struct {
 
 type SourceHandler interface {
 	Source() sources.SourceType
-	Archive(ctx context.Context, document *documents.Document, objects storage.ObjectStore) (Manifest, error)
+	Archive(ctx context.Context, document documents.Document, objects storage.ObjectStore) (Manifest, error)
 }
