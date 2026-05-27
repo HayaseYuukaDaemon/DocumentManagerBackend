@@ -28,6 +28,7 @@ func NewRouter(cfg config.Config, app *archive.App) http.Handler {
 	mux.Handle("GET /v1/documents/{document_id}", withAuth(cfg, http.HandlerFunc(router.getDocument)))
 	mux.Handle("DELETE /v1/documents/{document_id}", withAuth(cfg, http.HandlerFunc(router.removeDocument)))
 	mux.Handle("GET /v1/documents/{document_id}/manifest", withAuth(cfg, http.HandlerFunc(router.getManifest)))
+	mux.Handle("POST /v1/documents/{document_id}/refresh", withAuth(cfg, http.HandlerFunc(router.refreshDocument)))
 	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", withAuth(cfg, http.HandlerFunc(router.getPage)))
 	return mux
 }
@@ -73,6 +74,21 @@ func (r *Router) queryDocument(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (r *Router) refreshDocument(w http.ResponseWriter, req *http.Request) {
+	refreshMode := documents.RefreshMode(req.URL.Query().Get("mode"))
+	docID, err := strconv.Atoi(req.PathValue("document_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid document ID")
+		return
+	}
+	document, err := r.app.RefreshDocument(req.Context(), docID, refreshMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, document)
 }
 
 func (r *Router) getDocument(w http.ResponseWriter, req *http.Request) {

@@ -94,6 +94,27 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 	}
 }
 
+func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.RefreshMode) (documents.Document, error) {
+	document, err := a.documents.Get(ctx, id)
+	if err != nil {
+		return documents.Document{}, err
+	}
+
+	switch mode {
+	case documents.OnlyMetaData:
+		document.ArchiveStatus = documents.StatusQueued
+		a.documents.Update(ctx, document)
+	case documents.All:
+		document.ArchiveStatus = documents.StatusQueued
+		document.Progress.Done = 0
+		a.documents.Update(ctx, document)
+	default:
+		return documents.Document{}, fmt.Errorf("invalid refresh mode: %s", mode)
+	}
+
+	return document, nil
+}
+
 func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, error) {
 	return a.documents.Remove(ctx, id)
 }
@@ -132,21 +153,30 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 	if err != nil {
 		return a.failDocument(ctx, document, err)
 	}
-
-	document.ArchiveStatus = documents.StatusResolving
-	document, err = a.documents.Update(ctx, document)
-	if err != nil {
-		return document, err
-	}
-
 	objectStorage, err := a.getStorage(document.StorageBackend)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
 	}
-
-	manifest, err := handler.Archive(ctx, document, objectStorage)
+	document.ArchiveStatus = documents.StatusResolving
+	document, err = a.documents.Update(ctx, document)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
+	}
+	manifest, err := handler.ArchiveManifest(ctx, document)
+	if err != nil {
+		return a.failDocument(ctx, document, err)
+	}
+
+	if document.Progress.Done == 0 {
+		document.ArchiveStatus = documents.StatusDownloading
+		document, err = a.documents.Update(ctx, document)
+		if err != nil {
+			return a.failDocument(ctx, document, err)
+		}
+		err = handler.ArchiveContent(ctx, document, objectStorage)
+		if err != nil {
+			return a.failDocument(ctx, document, err)
+		}
 	}
 
 	document.ArchiveStatus = documents.StatusArchived

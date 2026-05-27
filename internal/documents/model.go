@@ -13,7 +13,6 @@ const (
 	StatusQueued      ArchiveStatus = "queued"
 	StatusResolving   ArchiveStatus = "resolving"
 	StatusDownloading ArchiveStatus = "downloading"
-	StatusUploading   ArchiveStatus = "uploading"
 	StatusArchived    ArchiveStatus = "archived"
 	StatusFailed      ArchiveStatus = "failed"
 )
@@ -51,6 +50,13 @@ type QueryMode string
 const (
 	QueryBySourceDocumentID QueryMode = "by_source_document_id"
 	QueryByRequestTime      QueryMode = "by_request_time"
+)
+
+type RefreshMode string
+
+const (
+	OnlyMetaData RefreshMode = "only_meta_data"
+	All          RefreshMode = "all"
 )
 
 type QueryInput struct {

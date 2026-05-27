@@ -24,6 +24,10 @@ func (Handler) Source() sources.SourceType {
 	return SourceTypeHitomi
 }
 
-func (Handler) Archive(ctx context.Context, document documents.Document, objects storage.ObjectStore) (archive.Manifest, error) {
+func (Handler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
+	return ErrNotImplemented
+}
+
+func (Handler) ArchiveManifest(ctx context.Context, document documents.Document) (archive.Manifest, error) {
 	return archive.Manifest{}, ErrNotImplemented
 }
