@@ -1,15 +1,9 @@
 package documents
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"document-archive/internal/sources"
 	"errors"
-	"fmt"
-	"io"
-	"strings"
 	"sync"
 	"time"
 )
@@ -17,104 +11,111 @@ import (
 var ErrNotFound = errors.New("document not found")
 
 type Store interface {
-	Create(ctx context.Context, document Document) (Document, error)
-	Get(ctx context.Context, id string) (Document, error)
-	GetBySourceIdentity(ctx context.Context, source string, sourceIdentity json.RawMessage) (Document, error)
-	Remove(ctx context.Context, id string) (Document, error)
-	ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error)
-	Update(ctx context.Context, document Document) (Document, error)
+	Create(ctx context.Context, document *Document) (*Document, error)
+	Get(ctx context.Context, id int) (*Document, error)
+	GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (*Document, error)
+	Remove(ctx context.Context, id int) (*Document, error)
+	ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]*Document, error)
+	Update(ctx context.Context, document *Document) (*Document, error)
 }
 
 type MemoryStore struct {
-	mu       sync.RWMutex
-	byID     map[string]Document
-	sourceID map[string]string
+	mu        sync.RWMutex
+	idMap     []*Document
+	sourceMap map[sources.SourceType]map[string]int
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		byID:     make(map[string]Document),
-		sourceID: make(map[string]string),
+		idMap:     make([]*Document, 0, 10),
+		sourceMap: make(map[sources.SourceType]map[string]int),
 	}
 }
 
-func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, error) {
+func (s *MemoryStore) Get(ctx context.Context, id int) (*Document, error) {
 	if err := ctx.Err(); err != nil {
-		return Document{}, err
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if id < 0 || id >= len(s.idMap) {
+		return nil, ErrNotFound
+	}
+	document := s.idMap[id]
+	if document == nil {
+		return nil, ErrNotFound
+	}
+	return cloneDocument(document), nil
+}
+
+func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (*Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sourceDocuments := s.sourceMap[source]
+	if sourceDocuments == nil {
+		return nil, ErrNotFound
+	}
+	id, exists := sourceDocuments[sourceDocumentID]
+	if !exists || id < 0 || id >= len(s.idMap) || s.idMap[id] == nil {
+		return nil, ErrNotFound
+	}
+	return cloneDocument(s.idMap[id]), nil
+}
+
+func (s *MemoryStore) Create(ctx context.Context, document *Document) (*Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sourceMap[document.Source] == nil {
+		s.sourceMap[document.Source] = make(map[string]int)
+	}
+
+	if id, exists := s.sourceMap[document.Source][document.SourceDocumentID]; exists {
+		if id >= 0 && id < len(s.idMap) && s.idMap[id] != nil {
+			return cloneDocument(s.idMap[id]), nil
+		}
+		delete(s.sourceMap[document.Source], document.SourceDocumentID)
 	}
 
 	now := time.Now().UTC()
+	document.ID = len(s.idMap)
 	document.CreatedAt = now
 	document.UpdatedAt = now
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key, err := sourceKey(document.Source, document.SourceIdentity)
-	if err != nil {
-		return Document{}, err
-	}
-	document.SourceIdentity = canonicalJSONRaw(document.SourceIdentity)
-	if existingID, ok := s.sourceID[key]; ok {
-		return s.byID[existingID], nil
-	}
-
-	s.byID[document.ID] = document
-	s.sourceID[key] = document.ID
-	return document, nil
+	stored := cloneDocument(document)
+	s.idMap = append(s.idMap, stored)
+	s.sourceMap[stored.Source][stored.SourceDocumentID] = stored.ID
+	return cloneDocument(stored), nil
 }
 
-func (s *MemoryStore) Get(ctx context.Context, id string) (Document, error) {
+func (s *MemoryStore) Remove(ctx context.Context, id int) (*Document, error) {
 	if err := ctx.Err(); err != nil {
-		return Document{}, err
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	document, ok := s.byID[id]
-	if !ok {
-		return Document{}, ErrNotFound
-	}
-	return document, nil
-}
-
-func (s *MemoryStore) GetBySourceIdentity(ctx context.Context, source string, sourceIdentity json.RawMessage) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return Document{}, err
-	}
-
-	key, err := sourceKey(source, sourceIdentity)
-	if err != nil {
-		return Document{}, err
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	id, ok := s.sourceID[key]
-	if !ok {
-		return Document{}, ErrNotFound
-	}
-	return s.byID[id], nil
-}
-
-func (s *MemoryStore) Remove(ctx context.Context, id string) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return Document{}, err
+		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	document, ok := s.byID[id]
-	if !ok {
-		return Document{}, ErrNotFound
+	if id < 0 || id >= len(s.idMap) {
+		return nil, ErrNotFound
+	}
+	document := s.idMap[id]
+	if document == nil {
+		return nil, ErrNotFound
 	}
 	document.Removed = true
 	document.UpdatedAt = time.Now().UTC()
-	s.byID[id] = document
-	return document, nil
+	return cloneDocument(document), nil
 }
 
-func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error) {
+func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -125,12 +126,15 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]Document, 0, limit)
-	for _, document := range s.byID {
+	result := make([]*Document, 0, limit)
+	for _, document := range s.idMap {
+		if document == nil {
+			continue
+		}
 		if document.ArchiveStatus != status {
 			continue
 		}
-		result = append(result, document)
+		result = append(result, cloneDocument(document))
 		if len(result) >= limit {
 			break
 		}
@@ -138,85 +142,45 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	return result, nil
 }
 
-func (s *MemoryStore) Update(ctx context.Context, document Document) (Document, error) {
+func (s *MemoryStore) Update(ctx context.Context, document *Document) (*Document, error) {
 	if err := ctx.Err(); err != nil {
-		return Document{}, err
+		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.byID[document.ID]
-	if !ok {
-		return Document{}, ErrNotFound
+	if document.ID < 0 || document.ID >= len(s.idMap) || s.idMap[document.ID] == nil {
+		return nil, ErrNotFound
 	}
 
-	oldKey, err := sourceKey(current.Source, current.SourceIdentity)
-	if err != nil {
-		return Document{}, err
-	}
-	newKey, err := sourceKey(document.Source, document.SourceIdentity)
-	if err != nil {
-		return Document{}, err
-	}
-	document.UpdatedAt = time.Now().UTC()
-	document.SourceIdentity = canonicalJSONRaw(document.SourceIdentity)
-	s.byID[document.ID] = document
-	if oldKey != newKey {
-		delete(s.sourceID, oldKey)
-	}
-	s.sourceID[newKey] = document.ID
-	return document, nil
-}
-
-func sourceKey(source string, sourceIdentity json.RawMessage) (string, error) {
-	source = strings.ToLower(strings.TrimSpace(source))
-	if source == "" {
-		return "", errors.New("source is required")
-	}
-
-	canonical, err := canonicalJSON(sourceIdentity)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canonical)
-	return source + ":" + hex.EncodeToString(sum[:]), nil
-}
-
-func canonicalJSONRaw(raw json.RawMessage) json.RawMessage {
-	canonical, err := canonicalJSON(raw)
-	if err != nil {
-		return raw
-	}
-	return canonical
-}
-
-func canonicalJSON(raw json.RawMessage) ([]byte, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, errors.New("source_identity is required")
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("decode source_identity: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return nil, errors.New("source_identity contains multiple json values")
+	current := s.idMap[document.ID]
+	if current.Source != document.Source || current.SourceDocumentID != document.SourceDocumentID {
+		if sourceDocuments := s.sourceMap[document.Source]; sourceDocuments != nil {
+			if existingID, exists := sourceDocuments[document.SourceDocumentID]; exists && existingID != document.ID {
+				return nil, errors.New("document source mapping already exists")
+			}
 		}
-		return nil, fmt.Errorf("decode source_identity trailing data: %w", err)
+		if sourceDocuments := s.sourceMap[current.Source]; sourceDocuments != nil {
+			delete(sourceDocuments, current.SourceDocumentID)
+		}
+		if s.sourceMap[document.Source] == nil {
+			s.sourceMap[document.Source] = make(map[string]int)
+		}
+		s.sourceMap[document.Source][document.SourceDocumentID] = document.ID
 	}
 
-	if value == nil {
-		return nil, errors.New("source_identity cannot be null")
-	}
+	document.UpdatedAt = time.Now().UTC()
+	s.idMap[document.ID] = cloneDocument(document)
+	return cloneDocument(s.idMap[document.ID]), nil
+}
 
-	canonical, err := json.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize source_identity: %w", err)
+func cloneDocument(document *Document) *Document {
+	if document == nil {
+		return nil
 	}
-	return canonical, nil
+	cloned := *document
+	if document.SourceMeta != nil {
+		cloned.SourceMeta = append([]byte(nil), document.SourceMeta...)
+	}
+	return &cloned
 }

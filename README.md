@@ -19,10 +19,11 @@ It owns source-specific download and archive workflows. Actual binary storage is
 ARCHIVE_ADDR=:8080 go run ./cmd/server
 ```
 
-Optional auth:
+Optional config:
 
 ```bash
 ARCHIVE_TOKEN=dev-secret go run ./cmd/server
+ARCHIVE_DEFAULT_STORAGE=memory go run ./cmd/server
 ```
 
 ## API sketch
@@ -32,7 +33,7 @@ Request a document archive:
 ```bash
 curl -X POST http://localhost:8080/v1/documents/request \
   -H 'Content-Type: application/json' \
-  -d '{"source":"hitomi","source_identity":{"hitomi_id":"3886065"}}'
+  -d '{"source":"hitomi","source_document_id":"3886065"}'
 ```
 
 Get a document:
@@ -46,7 +47,7 @@ Query documents by source metadata:
 ```bash
 curl -X POST http://localhost:8080/v1/documents/query \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"by_source_identity","params":{"source":"hitomi","source_identity":{"hitomi_id":"3886065"}}}'
+  -d '{"mode":"by_source_document_id","params":{"source":"hitomi","source_document_id":"3886065"}}'
 ```
 
 Soft-remove a document:

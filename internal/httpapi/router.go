@@ -3,7 +3,9 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 
 	"document-archive/internal/archive"
 	"document-archive/internal/config"
@@ -74,7 +76,12 @@ func (r *Router) queryDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) getDocument(w http.ResponseWriter, req *http.Request) {
-	document, err := r.app.GetDocument(req.Context(), req.PathValue("document_id"))
+	docID, err := strconv.Atoi(req.PathValue("document_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid document ID")
+		return
+	}
+	document, err := r.app.GetDocument(req.Context(), docID)
 	if err != nil {
 		if errors.Is(err, documents.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "document not found")
@@ -87,7 +94,12 @@ func (r *Router) getDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) removeDocument(w http.ResponseWriter, req *http.Request) {
-	document, err := r.app.RemoveDocument(req.Context(), req.PathValue("document_id"))
+	docID, err := strconv.Atoi(req.PathValue("document_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid document ID")
+		return
+	}
+	document, err := r.app.RemoveDocument(req.Context(), docID)
 	if err != nil {
 		if errors.Is(err, documents.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "document not found")
@@ -106,6 +118,41 @@ func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) getPage(w http.ResponseWriter, req *http.Request) {
 	documentID := req.PathValue("document_id")
-	pageIndex := req.PathValue("page_index")
-	writeError(w, http.StatusNotImplemented, "page api not implemented for document "+documentID+"/"+pageIndex)
+	pageIndex, err := strconv.Atoi(req.PathValue("page_index"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid page index")
+		return
+	}
+	docID, err := strconv.Atoi(documentID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid document ID")
+		return
+	}
+	doc, err := r.app.GetDocument(req.Context(), docID)
+	if err != nil {
+		if errors.Is(err, documents.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pageResult, err := r.app.GetPage(req.Context(), doc, pageIndex)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	switch pageResult.Kind {
+	case archive.PageResultRedirect:
+		http.Redirect(w, req, pageResult.RedirectURL, http.StatusFound)
+	case archive.PageResultObject:
+		defer pageResult.Object.Body.Close()
+		w.Header().Set("Content-Type", pageResult.Object.ContentType)
+		w.Header().Set("ETag", pageResult.Object.ETag)
+		w.Header().Set("Content-Length", strconv.FormatInt(pageResult.Object.Size, 10))
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, pageResult.Object.Body)
+	}
+	// r.app.objects // syntax errorz
+	// writeError(w, http.StatusNotImplemented, "page api not implemented for document "+documentID+"/"+pageIndex)
 }

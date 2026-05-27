@@ -25,10 +25,10 @@ func main() {
 	}))
 
 	documentStore := documents.NewMemoryStore()
-	objectStore := storage.NewNoopStore()
 
-	archiveApp := archive.NewApp(documentStore, objectStore, logger)
+	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend)
 	archiveApp.RegisterSource(hitomi.NewHandler())
+	archiveApp.RegisterStorage(storage.NewMemoryStore())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

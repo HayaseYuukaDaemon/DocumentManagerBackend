@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"document-archive/internal/documents"
+	"document-archive/internal/sources"
 	"document-archive/internal/storage"
 )
 
@@ -27,7 +28,20 @@ type Manifest struct {
 	Pages          []Page          `json:"pages"`
 }
 
+type PageResultKind string
+
+const (
+	PageResultRedirect PageResultKind = "redirect"
+	PageResultObject   PageResultKind = "object"
+)
+
+type PageResult struct {
+	Kind        PageResultKind
+	RedirectURL string
+	Object      storage.Object
+}
+
 type SourceHandler interface {
-	Source() string
-	Archive(ctx context.Context, document documents.Document, objects storage.ObjectStore) (Manifest, error)
+	Source() sources.SourceType
+	Archive(ctx context.Context, document *documents.Document, objects storage.ObjectStore) (Manifest, error)
 }

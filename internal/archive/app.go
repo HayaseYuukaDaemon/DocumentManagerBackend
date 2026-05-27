@@ -2,84 +2,99 @@ package archive
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"document-archive/internal/documents"
+	"document-archive/internal/sources"
 	"document-archive/internal/storage"
 )
 
 type App struct {
-	documents documents.Store
-	objects   storage.ObjectStore
-	sources   map[SourceName]SourceHandler
-	logger    *slog.Logger
+	documents      documents.Store
+	storages       map[storage.StorageName]storage.ObjectStore
+	defaultStorage storage.StorageName
+	sources        map[sources.SourceType]SourceHandler
+	logger         *slog.Logger
 }
 
-func NewApp(documentStore documents.Store, objects storage.ObjectStore, logger *slog.Logger) *App {
+func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage storage.StorageName) *App {
 	return &App{
-		documents: documentStore,
-		objects:   objects,
-		sources:   make(map[SourceName]SourceHandler),
-		logger:    logger,
+		documents:      documentStore,
+		storages:       make(map[storage.StorageName]storage.ObjectStore),
+		defaultStorage: defaultStorage,
+		sources:        make(map[sources.SourceType]SourceHandler),
+		logger:         logger,
 	}
 }
 
 func (a *App) RegisterSource(handler SourceHandler) {
-	a.sources[normalizeSource(handler.Source())] = handler
+	a.sources[handler.Source()] = handler
 }
 
-func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocumentInput) (documents.Document, error) {
-	input.Source = strings.TrimSpace(input.Source)
+func (a *App) RegisterStorage(storage storage.ObjectStore) {
+	a.storages[storage.StorageName()] = storage
+}
+
+func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocumentInput) (*documents.Document, error) {
 	if input.Source == "" {
-		return documents.Document{}, errors.New("source is required")
+		return nil, errors.New("source is required")
 	}
-	if len(input.SourceIdentity) == 0 {
-		return documents.Document{}, errors.New("source_identity is required")
+	if len(input.SourceDocumentID) == 0 {
+		return nil, errors.New("source_document_id is required")
 	}
 
 	if _, err := a.getSource(input.Source); err != nil {
-		return documents.Document{}, err
+		return nil, err
+	}
+
+	storageBackend := input.StorageBackend
+	if storageBackend == "" {
+		storageBackend = a.defaultStorage
+	}
+	if _, err := a.getStorage(storageBackend); err != nil {
+		return nil, err
 	}
 
 	document := documents.Document{
-		ID:             newDocumentID(),
-		Source:         input.Source,
-		SourceIdentity: input.SourceIdentity,
-		SourceMeta:     input.SourceMeta,
-		ArchiveStatus:  documents.StatusQueued,
+		Source:           input.Source,
+		SourceDocumentID: input.SourceDocumentID,
+		SourceMeta:       input.SourceMeta,
+		StorageBackend:   storageBackend,
+		ArchiveStatus:    documents.StatusQueued,
 	}
-	return a.documents.Create(ctx, document)
+	return a.documents.Create(ctx, &document)
 }
 
-func (a *App) GetDocument(ctx context.Context, id string) (documents.Document, error) {
+func (a *App) GetDocument(ctx context.Context, id int) (*documents.Document, error) {
 	return a.documents.Get(ctx, id)
 }
 
-func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
+func (a *App) GetPage(ctx context.Context, document *documents.Document, pageIndex int) (PageResult, error) {
+	return PageResult{}, nil
+}
+
+func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]*documents.Document, error) {
 	switch input.Mode {
-	case documents.QueryBySourceIdentity:
-		var params documents.QueryBySourceIdentityParams
+	case documents.QueryBySourceDocumentID:
+		var params documents.QueryBySourceDocumentIDParams
 		if err := json.Unmarshal(input.Params, &params); err != nil {
 			return nil, fmt.Errorf("decode query params: %w", err)
 		}
-		document, err := a.documents.GetBySourceIdentity(ctx, params.Source, params.SourceIdentity)
+		document, err := a.documents.GetBySourceDocumentID(ctx, params.Source, params.SourceDocumentID)
 		if err != nil {
 			return nil, err
 		}
-		return []documents.Document{document}, nil
+		return []*documents.Document{document}, nil
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}
 }
 
-func (a *App) RemoveDocument(ctx context.Context, id string) (documents.Document, error) {
+func (a *App) RemoveDocument(ctx context.Context, id int) (*documents.Document, error) {
 	return a.documents.Remove(ctx, id)
 }
 
@@ -112,7 +127,7 @@ func (a *App) processQueued(ctx context.Context) {
 	}
 }
 
-func (a *App) processDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
+func (a *App) processDocument(ctx context.Context, document *documents.Document) (*documents.Document, error) {
 	handler, err := a.getSource(document.Source)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
@@ -124,7 +139,12 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 		return document, err
 	}
 
-	manifest, err := handler.Archive(ctx, document, a.objects)
+	objectStorage, err := a.getStorage(document.StorageBackend)
+	if err != nil {
+		return a.failDocument(ctx, document, err)
+	}
+
+	manifest, err := handler.Archive(ctx, document, objectStorage)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
 	}
@@ -133,7 +153,6 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 	document.Progress.Done = manifest.PageCount
 	document.Progress.Total = manifest.PageCount
 	document.PageCount = manifest.PageCount
-	document.ManifestKey = ManifestObjectKey(document.ID)
 	document.Error = ""
 	if manifest.Title != "" {
 		document.Title = manifest.Title
@@ -141,15 +160,23 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 	return a.documents.Update(ctx, document)
 }
 
-func (a *App) getSource(source string) (SourceHandler, error) {
-	handler, ok := a.sources[normalizeSource(source)]
+func (a *App) getSource(source sources.SourceType) (SourceHandler, error) {
+	handler, ok := a.sources[source]
 	if !ok {
 		return nil, fmt.Errorf("source handler not found: %s", source)
 	}
 	return handler, nil
 }
 
-func (a *App) failDocument(ctx context.Context, document documents.Document, cause error) (documents.Document, error) {
+func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStore, error) {
+	objectStorage := a.storages[storageBackend]
+	if objectStorage == nil {
+		return nil, fmt.Errorf("storage backend not found: %s", storageBackend)
+	}
+	return objectStorage, nil
+}
+
+func (a *App) failDocument(ctx context.Context, document *documents.Document, cause error) (*documents.Document, error) {
 	document.ArchiveStatus = documents.StatusFailed
 	document.Error = cause.Error()
 	updated, err := a.documents.Update(ctx, document)
@@ -158,16 +185,4 @@ func (a *App) failDocument(ctx context.Context, document documents.Document, cau
 	}
 	a.logger.Warn("document archive failed", "document_id", document.ID, "error", cause)
 	return updated, cause
-}
-
-func normalizeSource(source string) SourceName {
-	return SourceName(strings.ToLower(strings.TrimSpace(source)))
-}
-
-func newDocumentID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b[:])
 }

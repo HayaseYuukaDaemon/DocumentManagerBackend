@@ -1,6 +1,8 @@
 package documents
 
 import (
+	"document-archive/internal/sources"
+	"document-archive/internal/storage"
 	"encoding/json"
 	"time"
 )
@@ -22,34 +24,34 @@ type Progress struct {
 }
 
 type Document struct {
-	ID                string          `json:"document_id"`
-	Source            string          `json:"source"`
-	SourceIdentity    json.RawMessage `json:"source_identity"`
-	SourceMeta        json.RawMessage `json:"source_meta,omitempty"`
-	Title             string          `json:"title,omitempty"`
-	StorageBackend    string          `json:"storage_backend,omitempty"`
-	ArchiveStatus     ArchiveStatus   `json:"archive_status"`
-	Progress          Progress        `json:"progress"`
-	Error             string          `json:"error,omitempty"`
-	PageCount         int             `json:"page_count,omitempty"`
-	ManifestKey       string          `json:"manifest_key,omitempty"`
-	Removed           bool            `json:"removed"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
-	MetadataUpdatedAt *time.Time      `json:"metadata_updated_at,omitempty"`
+	ID               int                 `json:"document_id"`
+	Source           sources.SourceType  `json:"source"`
+	SourceDocumentID string              `json:"source_document_id"`
+	SourceMeta       json.RawMessage     `json:"source_meta,omitempty"`
+	Title            string              `json:"title,omitempty"`
+	StorageBackend   storage.StorageName `json:"storage_backend,omitempty"`
+	ArchiveStatus    ArchiveStatus       `json:"archive_status"`
+	Progress         Progress            `json:"progress"`
+	Error            string              `json:"error,omitempty"`
+	PageCount        int                 `json:"page_count,omitempty"`
+	ManifestKey      string              `json:"manifest_key,omitempty"`
+	Removed          bool                `json:"removed"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
 }
 
 type RequestDocumentInput struct {
-	Source         string          `json:"source"`
-	SourceIdentity json.RawMessage `json:"source_identity"`
-	SourceMeta     json.RawMessage `json:"source_meta,omitempty"`
+	Source           sources.SourceType  `json:"source"`
+	SourceDocumentID string              `json:"source_document_id"`
+	SourceMeta       json.RawMessage     `json:"source_meta,omitempty"`
+	StorageBackend   storage.StorageName `json:"storage_backend,omitempty"`
 }
 
 type QueryMode string
 
 const (
-	QueryBySourceIdentity QueryMode = "by_source_identity"
-	QueryByRequestTime    QueryMode = "by_request_time"
+	QueryBySourceDocumentID QueryMode = "by_source_document_id"
+	QueryByRequestTime      QueryMode = "by_request_time"
 )
 
 type QueryInput struct {
@@ -57,7 +59,7 @@ type QueryInput struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-type QueryBySourceIdentityParams struct {
-	Source         string          `json:"source"`
-	SourceIdentity json.RawMessage `json:"source_identity"`
+type QueryBySourceDocumentIDParams struct {
+	Source           sources.SourceType `json:"source"`
+	SourceDocumentID string             `json:"source_document_id"`
 }
