@@ -17,7 +17,7 @@ type Store interface {
 	GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error)
 	Remove(ctx context.Context, id int) (Document, error)
 	ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error)
-	Update(ctx context.Context, document Document) (Document, error)
+	Update(ctx context.Context, document Document) error
 }
 
 type MemoryStore struct {
@@ -133,22 +133,22 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	return result, nil
 }
 
-func (s *MemoryStore) Update(ctx context.Context, document Document) (Document, error) {
+func (s *MemoryStore) Update(ctx context.Context, document Document) error {
 	if err := ctx.Err(); err != nil {
-		return Document{}, err
+		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if document.ID < 0 || document.ID >= len(s.idMap) {
-		return Document{}, ErrNotFound
+		return ErrNotFound
 	}
 
 	current := s.idMap[document.ID]
 	if current.Source != document.Source || current.SourceDocumentID != document.SourceDocumentID {
 		if sourceDocuments := s.sourceMap[document.Source]; sourceDocuments != nil {
 			if existingID, exists := sourceDocuments[document.SourceDocumentID]; exists && existingID != document.ID {
-				return Document{}, errors.New("document source mapping already exists")
+				return errors.New("document source mapping already exists")
 			}
 		}
 		if sourceDocuments := s.sourceMap[current.Source]; sourceDocuments != nil {
@@ -162,5 +162,5 @@ func (s *MemoryStore) Update(ctx context.Context, document Document) (Document, 
 
 	document.UpdatedAt = time.Now().UTC()
 	s.idMap[document.ID] = document
-	return document, nil
+	return nil
 }

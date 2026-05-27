@@ -31,8 +31,23 @@ func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage s
 	}
 }
 
-func (a *App) RegisterSource(handler SourceHandler) {
+func (a *App) onPageDownloaded(ctx context.Context, documentID int, page Page) error {
+	document, err := a.documents.Get(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	document.Progress.Done++
+	err = a.documents.Update(ctx, document)
+	return err
+}
+
+func (a *App) RegisterSource(handler SourceHandler) error {
+	err := handler.RegisterPageDownloadHook(a.onPageDownloaded)
+	if err != nil {
+		return err
+	}
 	a.sources[handler.Source()] = handler
+	return nil
 }
 
 func (a *App) RegisterStorage(storage storage.ObjectStore) {
@@ -103,16 +118,15 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 	switch mode {
 	case documents.OnlyMetaData:
 		document.ArchiveStatus = documents.StatusQueued
-		a.documents.Update(ctx, document)
+		err = a.documents.Update(ctx, document)
 	case documents.All:
 		document.ArchiveStatus = documents.StatusQueued
 		document.Progress.Done = 0
-		a.documents.Update(ctx, document)
+		err = a.documents.Update(ctx, document)
 	default:
 		return documents.Document{}, fmt.Errorf("invalid refresh mode: %s", mode)
 	}
-
-	return document, nil
+	return document, err
 }
 
 func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, error) {
@@ -158,18 +172,18 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 		return a.failDocument(ctx, document, err)
 	}
 	document.ArchiveStatus = documents.StatusResolving
-	document, err = a.documents.Update(ctx, document)
+	err = a.documents.Update(ctx, document)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
 	}
-	manifest, err := handler.ArchiveManifest(ctx, document)
+	manifest, err := handler.ArchiveManifest(ctx, document, objectStorage)
 	if err != nil {
 		return a.failDocument(ctx, document, err)
 	}
 
 	if document.Progress.Done == 0 {
 		document.ArchiveStatus = documents.StatusDownloading
-		document, err = a.documents.Update(ctx, document)
+		err = a.documents.Update(ctx, document)
 		if err != nil {
 			return a.failDocument(ctx, document, err)
 		}
@@ -187,7 +201,11 @@ func (a *App) processDocument(ctx context.Context, document documents.Document) 
 	if manifest.Title != "" {
 		document.Title = manifest.Title
 	}
-	return a.documents.Update(ctx, document)
+	err = a.documents.Update(ctx, document)
+	if err != nil {
+		return documents.Document{}, err
+	}
+	return document, nil
 }
 
 func (a *App) getSource(source sources.SourceType) (SourceHandler, error) {
@@ -209,10 +227,10 @@ func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStor
 func (a *App) failDocument(ctx context.Context, document documents.Document, cause error) (documents.Document, error) {
 	document.ArchiveStatus = documents.StatusFailed
 	document.Error = cause.Error()
-	updated, err := a.documents.Update(ctx, document)
+	err := a.documents.Update(ctx, document)
 	if err != nil {
 		return document, err
 	}
 	a.logger.Warn("document archive failed", "document_id", document.ID, "error", cause)
-	return updated, cause
+	return document, cause
 }

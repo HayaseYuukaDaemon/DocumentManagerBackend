@@ -61,7 +61,7 @@ func TestMemoryStoreBoundsChecks(t *testing.T) {
 	if _, err := store.Remove(ctx, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for remove missing, got %v", err)
 	}
-	if _, err := store.Update(ctx, Document{ID: 0}); !errors.Is(err, ErrNotFound) {
+	if err := store.Update(ctx, Document{ID: 0}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for update missing, got %v", err)
 	}
 }
@@ -80,12 +80,9 @@ func TestMemoryStoreUpdateMaintainsSourceIndex(t *testing.T) {
 	}
 
 	doc.SourceDocumentID = "new"
-	updated, err := store.Update(ctx, doc)
+	err = store.Update(ctx, doc)
 	if err != nil {
 		t.Fatalf("Update returned error: %v", err)
-	}
-	if updated.SourceDocumentID != "new" {
-		t.Fatalf("unexpected updated source document id: %s", updated.SourceDocumentID)
 	}
 
 	if _, err := store.GetBySourceDocumentID(ctx, testSource, "old"); !errors.Is(err, ErrNotFound) {

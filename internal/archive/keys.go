@@ -11,10 +11,6 @@ func ManifestObjectKey(documentID string) string {
 	return path.Join(objectRoot, documentID, "manifest.json")
 }
 
-func SourceObjectKey(documentID string) string {
-	return path.Join(objectRoot, documentID, "source.json")
-}
-
 func PageObjectKey(documentID string, index int, contentType string) string {
 	ext := contentTypeExt(contentType)
 	return path.Join(objectRoot, documentID, "pages", fmt.Sprintf("%06d.%s", index+1, ext))

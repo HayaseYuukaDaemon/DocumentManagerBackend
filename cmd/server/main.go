@@ -27,7 +27,11 @@ func main() {
 	documentStore := documents.NewMemoryStore()
 
 	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend)
-	archiveApp.RegisterSource(hitomi.NewHandler())
+	err := archiveApp.RegisterSource(hitomi.NewHandler())
+	if err != nil {
+		logger.Error("failed to register source", "error", err)
+		os.Exit(1)
+	}
 	archiveApp.RegisterStorage(storage.NewMemoryStore())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

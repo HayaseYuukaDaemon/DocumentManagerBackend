@@ -77,6 +77,7 @@ func (r *Router) queryDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) refreshDocument(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
 	refreshMode := documents.RefreshMode(req.URL.Query().Get("mode"))
 	docID, err := strconv.Atoi(req.PathValue("document_id"))
 	if err != nil {
@@ -92,6 +93,7 @@ func (r *Router) refreshDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) getDocument(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
 	docID, err := strconv.Atoi(req.PathValue("document_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid document ID")
@@ -110,6 +112,7 @@ func (r *Router) getDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) removeDocument(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
 	docID, err := strconv.Atoi(req.PathValue("document_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid document ID")
@@ -128,11 +131,13 @@ func (r *Router) removeDocument(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) getManifest(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
 	documentID := req.PathValue("document_id")
 	writeError(w, http.StatusNotImplemented, "manifest api not implemented for document "+documentID)
 }
 
 func (r *Router) getPage(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
 	documentID := req.PathValue("document_id")
 	pageIndex, err := strconv.Atoi(req.PathValue("page_index"))
 	if err != nil {
@@ -169,6 +174,4 @@ func (r *Router) getPage(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		io.Copy(w, pageResult.Object.Body)
 	}
-	// r.app.objects // syntax errorz
-	// writeError(w, http.StatusNotImplemented, "page api not implemented for document "+documentID+"/"+pageIndex)
 }
