@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"document-archive/internal/sources"
@@ -95,9 +94,6 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := s.migrateLegacyDocumentsUniqueConstraint(ctx); err != nil {
-		return err
-	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, removed, id)`); err != nil {
 		return err
 	}
@@ -111,77 +107,6 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	}
 	// SQLite 默认禁用 foreign_keys；启用它以便页面行保持
 	// 关联到有效的文档行。
-	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *SQLiteStore) migrateLegacyDocumentsUniqueConstraint(ctx context.Context) error {
-	var schema string
-	err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'`).Scan(&schema)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	normalized := strings.Join(strings.Fields(strings.ToLower(schema)), " ")
-	if !strings.Contains(normalized, "unique(source, source_document_id)") &&
-		!strings.Contains(normalized, "unique (source, source_document_id)") {
-		return nil
-	}
-
-	// 早期 schema 把 source identity 做成了全局唯一约束，导致软删除后
-	// 不能重新插入同一个源文档。SQLite 不能直接删除表级 UNIQUE 约束，
-	// 所以这里重建 documents 表，再用 partial unique index 约束未删除行。
-	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
-		return err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx)
-
-	statements := []string{
-		`CREATE TABLE documents_new (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			source TEXT NOT NULL,
-			source_document_id TEXT NOT NULL,
-			source_meta TEXT,
-			title TEXT NOT NULL DEFAULT '',
-			storage_backend TEXT NOT NULL DEFAULT '',
-			archive_status TEXT NOT NULL,
-			progress_done INTEGER NOT NULL DEFAULT 0,
-			progress_total INTEGER NOT NULL DEFAULT 0,
-			error TEXT NOT NULL DEFAULT '',
-			removed INTEGER NOT NULL DEFAULT 0,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`INSERT INTO documents_new (
-			id, source, source_document_id, source_meta, title, storage_backend,
-			archive_status, progress_done, progress_total, error, removed,
-			created_at, updated_at
-		)
-		SELECT
-			id, source, source_document_id, source_meta, title, storage_backend,
-			archive_status, progress_done, progress_total, error, removed,
-			created_at, updated_at
-		FROM documents`,
-		`DROP TABLE documents`,
-		`ALTER TABLE documents_new RENAME TO documents`,
-	}
-	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
 		return err
 	}

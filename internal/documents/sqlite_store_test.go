@@ -2,7 +2,6 @@ package documents
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -159,72 +158,6 @@ func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	}
 	if second.ID <= first.ID {
 		t.Fatalf("expected recreated document to get a new larger ID, first=%d second=%d", first.ID, second.ID)
-	}
-}
-
-func TestSQLiteStoreMigratesLegacyUniqueConstraint(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "documents.db")
-
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open returned error: %v", err)
-	}
-	_, err = db.ExecContext(ctx, `CREATE TABLE documents (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		source TEXT NOT NULL,
-		source_document_id TEXT NOT NULL,
-		source_meta TEXT,
-		title TEXT NOT NULL DEFAULT '',
-		storage_backend TEXT NOT NULL DEFAULT '',
-		archive_status TEXT NOT NULL,
-		progress_done INTEGER NOT NULL DEFAULT 0,
-		progress_total INTEGER NOT NULL DEFAULT 0,
-		error TEXT NOT NULL DEFAULT '',
-		removed INTEGER NOT NULL DEFAULT 0,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL,
-		UNIQUE(source, source_document_id)
-	);
-	CREATE TABLE document_pages (
-		document_id INTEGER NOT NULL,
-		page_index INTEGER NOT NULL,
-		object_key TEXT NOT NULL,
-		content_type TEXT NOT NULL,
-		size INTEGER NOT NULL,
-		PRIMARY KEY(document_id, page_index),
-		FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
-	);
-	INSERT INTO documents (
-		source, source_document_id, title, storage_backend, archive_status,
-		progress_done, progress_total, error, removed, created_at, updated_at
-	) VALUES (
-		'test', 'legacy-recreate', '', '', 'queued',
-		0, 0, '', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
-	)`)
-	if closeErr := db.Close(); closeErr != nil {
-		t.Fatalf("db.Close returned error: %v", closeErr)
-	}
-	if err != nil {
-		t.Fatalf("legacy schema setup returned error: %v", err)
-	}
-
-	store, err := NewSQLiteStore(ctx, path)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore returned error: %v", err)
-	}
-	defer store.Close()
-
-	doc, err := store.Create(ctx, Document{
-		Source:           testSource,
-		SourceDocumentID: "legacy-recreate",
-		ArchiveStatus:    StatusQueued,
-	})
-	if err != nil {
-		t.Fatalf("Create after migration returned error: %v", err)
-	}
-	if doc.ID <= 1 {
-		t.Fatalf("expected migrated store to allocate a new ID, got %d", doc.ID)
 	}
 }
 
