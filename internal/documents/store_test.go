@@ -10,7 +10,7 @@ import (
 
 const testSource sources.SourceType = "test"
 
-func TestMemoryStoreCreateIsIdempotent(t *testing.T) {
+func TestMemoryStoreCreateRejectsDuplicateSourceDocument(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
 
@@ -28,15 +28,15 @@ func TestMemoryStoreCreateIsIdempotent(t *testing.T) {
 		SourceDocumentID: "abc",
 		ArchiveStatus:    StatusQueued,
 	})
-	if err == nil {
-		t.Fatalf("second Create should have returned error: %v", err)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("second Create should have returned ErrAlreadyExists, got %v", err)
 	}
 
 	if first.ID != 0 {
 		t.Fatalf("unexpected first ID: %d", first.ID)
 	}
 	if second.ID != first.ID {
-		t.Fatalf("expected idempotent create to return existing document ID %d, got %d", first.ID, second.ID)
+		t.Fatalf("expected duplicate create to return existing document ID %d, got %d", first.ID, second.ID)
 	}
 
 	bySource, err := store.GetBySourceDocumentID(ctx, testSource, "abc")
@@ -45,6 +45,36 @@ func TestMemoryStoreCreateIsIdempotent(t *testing.T) {
 	}
 	if bySource.ID != first.ID {
 		t.Fatalf("unexpected document by source ID: %d", bySource.ID)
+	}
+}
+
+func TestMemoryStoreRemovedDocumentsAreHidden(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	doc, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "removed",
+		ArchiveStatus:    StatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.Remove(ctx, doc.ID); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected removed document to be hidden by Get, got %v", err)
+	}
+	if _, err := store.GetBySourceDocumentID(ctx, testSource, "removed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected removed document to be hidden by source lookup, got %v", err)
+	}
+	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
+	if err != nil {
+		t.Fatalf("ListByStatus returned error: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("expected removed document to be hidden by ListByStatus, got %#v", queued)
 	}
 }
 

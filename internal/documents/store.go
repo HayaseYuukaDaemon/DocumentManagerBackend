@@ -10,6 +10,7 @@ import (
 )
 
 var ErrNotFound = errors.New("document not found")
+var ErrAlreadyExists = errors.New("document already exists")
 
 type Store interface {
 	Create(ctx context.Context, document Document) (Document, error)
@@ -56,7 +57,7 @@ func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, d := range s.idMap {
-		if d.Source == source && d.SourceDocumentID == sourceDocumentID {
+		if d.Source == source && d.SourceDocumentID == sourceDocumentID && !d.Removed {
 			return d, nil
 		}
 	}
@@ -74,7 +75,7 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 	for _, d := range s.idMap {
 		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID {
 			if d.Removed == false {
-				return Document{}, errors.New("document already exists")
+				return d, ErrAlreadyExists
 			}
 			document.ID = d.ID
 		}
@@ -122,6 +123,9 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 
 	result := make([]Document, 0, limit)
 	for _, document := range s.idMap {
+		if document.Removed {
+			continue
+		}
 		if document.ArchiveStatus != status {
 			continue
 		}
@@ -142,6 +146,9 @@ func (s *MemoryStore) Update(ctx context.Context, id int, fn func(*Document) err
 	defer s.mu.Unlock()
 	if id < 0 || id >= len(s.idMap) {
 		return Document{}, ErrNotFound
+	}
+	if fn == nil {
+		return Document{}, errors.New("document update callback is required")
 	}
 
 	document := &s.idMap[id]

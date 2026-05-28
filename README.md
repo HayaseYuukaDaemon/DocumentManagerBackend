@@ -8,10 +8,10 @@ It owns source-specific download and archive workflows. Actual binary storage is
 
 - HTTP API skeleton
 - Bearer-token auth middleware
-- In-memory document store
+- SQLite document store with in-memory option
 - Document status worker
 - ObjectStore interface
-- Hitomi resolver and source handler placeholder
+- Hitomi resolver and source handler
 
 ## Run
 
@@ -19,11 +19,15 @@ It owns source-specific download and archive workflows. Actual binary storage is
 ARCHIVE_ADDR=:8080 go run ./cmd/server
 ```
 
+Document metadata is stored in `document-archive.db` by default.
+
 Optional config:
 
 ```bash
 ARCHIVE_TOKEN=dev-secret go run ./cmd/server
 ARCHIVE_DEFAULT_STORAGE=memory go run ./cmd/server
+ARCHIVE_DOCUMENT_STORE=memory go run ./cmd/server
+ARCHIVE_SQLITE_PATH=/var/lib/document-archive/documents.db go run ./cmd/server
 ```
 
 ## API sketch

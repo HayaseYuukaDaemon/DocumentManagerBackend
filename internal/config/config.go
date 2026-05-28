@@ -12,6 +12,8 @@ type Config struct {
 	AuthToken             string
 	LogLevel              slog.Level
 	DefaultStorageBackend storage.StorageName
+	DocumentStore         string
+	SQLitePath            string
 }
 
 func Load() Config {
@@ -20,6 +22,8 @@ func Load() Config {
 		AuthToken:             os.Getenv("ARCHIVE_TOKEN"),
 		LogLevel:              parseLogLevel(getenv("ARCHIVE_LOG_LEVEL", "info")),
 		DefaultStorageBackend: storage.StorageName(getenv("ARCHIVE_DEFAULT_STORAGE", string(storage.MemoryStorageName))),
+		DocumentStore:         strings.ToLower(getenv("ARCHIVE_DOCUMENT_STORE", "sqlite")),
+		SQLitePath:            getenv("ARCHIVE_SQLITE_PATH", "document-archive.db"),
 	}
 }
 

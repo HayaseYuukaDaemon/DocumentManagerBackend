@@ -8,6 +8,10 @@
 .env
 *.local
 
+# Local SQLite data
+*.db
+*.db-*
+
 # Editor/OS
 .vscode/
 .idea/
