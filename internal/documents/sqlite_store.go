@@ -19,6 +19,8 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+// NewSQLiteStore opens the SQLite file and makes sure the schema exists.
+// The returned store owns db; callers should call Close during service shutdown.
 func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if path == "" {
 		path = "document-archive.db"
@@ -35,6 +37,8 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite allows concurrent readers, but only one writer at a time. Keeping one
+	// database connection makes transaction behavior predictable for this service.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
@@ -52,8 +56,14 @@ func (s *SQLiteStore) Close() error {
 
 func (s *SQLiteStore) init(ctx context.Context) error {
 	statements := []string{
+		// foreign_keys is disabled by default in SQLite; enable it so page rows stay
+		// attached to valid document rows.
 		`PRAGMA foreign_keys = ON`,
+		// WAL lets readers continue while another transaction is writing, which fits
+		// the worker-plus-HTTP-access pattern better than the default rollback journal.
 		`PRAGMA journal_mode = WAL`,
+		// Let SQLite wait briefly when the database is locked instead of failing
+		// immediately under a request/worker race.
 		`PRAGMA busy_timeout = 5000`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +81,8 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			UNIQUE(source, source_document_id)
 		)`,
+		// Pages are stored separately because page hooks update them one by one. A
+		// separate table avoids rewriting large JSON blobs during downloads.
 		`CREATE TABLE IF NOT EXISTS document_pages (
 			document_id INTEGER NOT NULL,
 			page_index INTEGER NOT NULL,
@@ -107,6 +119,8 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	case err == nil && !existing.Removed:
 		return existing, ErrAlreadyExists
 	case err == nil && existing.Removed:
+		// Source identity is unique. If the previous row was soft-deleted, reuse its
+		// primary key instead of inserting another row with the same source identity.
 		now := time.Now().UTC()
 		document.ID = existing.ID
 		document.CreatedAt = now
@@ -273,6 +287,9 @@ func (s *SQLiteStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	// Load pages after closing the document rows cursor. With one SQLite connection,
+	// keeping a cursor open while issuing another query can unnecessarily serialize
+	// or block follow-up statements.
 	for i := range result {
 		pages, err := listPagesTx(ctx, tx, result[i].ID)
 		if err != nil {
@@ -304,6 +321,9 @@ func (s *SQLiteStore) Update(ctx context.Context, id int, fn func(*Document) err
 	if err != nil {
 		return Document{}, err
 	}
+	// The callback runs inside the same transaction as the read and write. This
+	// keeps hook updates and status transitions from overwriting each other with
+	// stale document snapshots.
 	if err := fn(&document); err != nil {
 		return Document{}, err
 	}
@@ -366,6 +386,8 @@ type documentScanner interface {
 	Scan(dest ...any) error
 }
 
+// scanDocument maps the flat documents table into the public Document model.
+// Page rows are loaded separately by callers because they live in document_pages.
 func scanDocument(scanner documentScanner) (Document, error) {
 	var document Document
 	var source string
@@ -475,6 +497,8 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 		if err := rows.Scan(&page.Index, &page.Key, &page.ContentType, &page.Size); err != nil {
 			return nil, err
 		}
+		// Preserve direct page-index addressing: document.Pages[pageIndex] should
+		// resolve to that page even if a previous download left a gap.
 		if page.Index >= len(pages) {
 			pages = append(pages, make([]Page, page.Index-len(pages)+1)...)
 		}
@@ -487,6 +511,8 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 }
 
 func replacePagesTx(ctx context.Context, tx *sql.Tx, documentID int, pages []Page) error {
+	// Updates usually mutate a full Document value. Replacing page rows keeps the
+	// database in sync with that value and makes retries idempotent.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ?`, documentID); err != nil {
 		return err
 	}
@@ -510,6 +536,8 @@ func replacePagesTx(ctx context.Context, tx *sql.Tx, documentID int, pages []Pag
 }
 
 func rollback(tx *sql.Tx) {
+	// Rollback after Commit returns sql.ErrTxDone; the caller already handled the
+	// real error path, so this cleanup helper intentionally ignores it.
 	_ = tx.Rollback()
 }
 
