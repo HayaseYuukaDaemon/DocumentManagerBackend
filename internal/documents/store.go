@@ -71,25 +71,19 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	document.ID = len(s.idMap)
 	for _, d := range s.idMap {
-		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID {
-			if d.Removed == false {
-				return d, ErrAlreadyExists
-			}
-			document.ID = d.ID
+		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID && !d.Removed {
+			return d, ErrAlreadyExists
 		}
 	}
 
 	now := time.Now().UTC()
 
+	document.ID = len(s.idMap)
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	if document.ID == len(s.idMap) {
-		s.idMap = append(s.idMap, document)
-	} else {
-		s.idMap[document.ID] = document
-	}
+	document.Removed = false
+	s.idMap = append(s.idMap, document)
 	return document, nil
 }
 

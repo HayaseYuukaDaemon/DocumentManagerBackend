@@ -78,6 +78,35 @@ func TestMemoryStoreRemovedDocumentsAreHidden(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	first, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "recreate",
+		ArchiveStatus:    StatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.Remove(ctx, first.ID); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+
+	second, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "recreate",
+		ArchiveStatus:    StatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("second Create returned error: %v", err)
+	}
+	if second.ID <= first.ID {
+		t.Fatalf("expected recreated document to get a new larger ID, first=%d second=%d", first.ID, second.ID)
+	}
+}
+
 func TestMemoryStoreBoundsChecks(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

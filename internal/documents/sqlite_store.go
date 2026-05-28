@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"document-archive/internal/sources"
@@ -19,8 +20,8 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteStore opens the SQLite file and makes sure the schema exists.
-// The returned store owns db; callers should call Close during service shutdown.
+// NewSQLiteStore 打开 SQLite 文件并确保 Schema 存在。
+// 返回的 store 拥有 db 实例的所有权；调用方应在服务关闭期间调用 Close。
 func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if path == "" {
 		path = "document-archive.db"
@@ -37,8 +38,8 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	// SQLite allows concurrent readers, but only one writer at a time. Keeping one
-	// database connection makes transaction behavior predictable for this service.
+	// SQLite 允许多个并发读取者，但同一时间只允许一个写入者。保持单一的
+	// 数据库连接可以使该服务的事务行为具有可预测性。
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
@@ -56,14 +57,11 @@ func (s *SQLiteStore) Close() error {
 
 func (s *SQLiteStore) init(ctx context.Context) error {
 	statements := []string{
-		// foreign_keys is disabled by default in SQLite; enable it so page rows stay
-		// attached to valid document rows.
-		`PRAGMA foreign_keys = ON`,
-		// WAL lets readers continue while another transaction is writing, which fits
-		// the worker-plus-HTTP-access pattern better than the default rollback journal.
+		// WAL 模式允许读取者在另一个事务写入时继续操作，这比默认的回滚日志
+		// 更适合工作线程与 HTTP 访问并发的模式。
 		`PRAGMA journal_mode = WAL`,
-		// Let SQLite wait briefly when the database is locked instead of failing
-		// immediately under a request/worker race.
+		// 当数据库被锁定时让 SQLite 等待一小会儿，而不是
+		// 在请求/工作线程出现竞争时立即失败。
 		`PRAGMA busy_timeout = 5000`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,11 +76,10 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			removed INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			UNIQUE(source, source_document_id)
+			updated_at TEXT NOT NULL
 		)`,
-		// Pages are stored separately because page hooks update them one by one. A
-		// separate table avoids rewriting large JSON blobs during downloads.
+		// 页面单独存储是因为页面钩子会逐个更新它们。使用
+		// 单独的表可以避免在下载时重写大型的 JSON blob。
 		`CREATE TABLE IF NOT EXISTS document_pages (
 			document_id INTEGER NOT NULL,
 			page_index INTEGER NOT NULL,
@@ -92,13 +89,101 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			PRIMARY KEY(document_id, page_index),
 			FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, removed, id)`,
-		`CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_index)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+	}
+	if err := s.migrateLegacyDocumentsUniqueConstraint(ctx); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, removed, id)`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_active_source_identity
+		ON documents(source, source_document_id)
+		WHERE removed = 0`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_index)`); err != nil {
+		return err
+	}
+	// SQLite 默认禁用 foreign_keys；启用它以便页面行保持
+	// 关联到有效的文档行。
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) migrateLegacyDocumentsUniqueConstraint(ctx context.Context) error {
+	var schema string
+	err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'`).Scan(&schema)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	normalized := strings.Join(strings.Fields(strings.ToLower(schema)), " ")
+	if !strings.Contains(normalized, "unique(source, source_document_id)") &&
+		!strings.Contains(normalized, "unique (source, source_document_id)") {
+		return nil
+	}
+
+	// 早期 schema 把 source identity 做成了全局唯一约束，导致软删除后
+	// 不能重新插入同一个源文档。SQLite 不能直接删除表级 UNIQUE 约束，
+	// 所以这里重建 documents 表，再用 partial unique index 约束未删除行。
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	statements := []string{
+		`CREATE TABLE documents_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source TEXT NOT NULL,
+			source_document_id TEXT NOT NULL,
+			source_meta TEXT,
+			title TEXT NOT NULL DEFAULT '',
+			storage_backend TEXT NOT NULL DEFAULT '',
+			archive_status TEXT NOT NULL,
+			progress_done INTEGER NOT NULL DEFAULT 0,
+			progress_total INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			removed INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO documents_new (
+			id, source, source_document_id, source_meta, title, storage_backend,
+			archive_status, progress_done, progress_total, error, removed,
+			created_at, updated_at
+		)
+		SELECT
+			id, source, source_document_id, source_meta, title, storage_backend,
+			archive_status, progress_done, progress_total, error, removed,
+			created_at, updated_at
+		FROM documents`,
+		`DROP TABLE documents`,
+		`ALTER TABLE documents_new RENAME TO documents`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -114,28 +199,10 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	}
 	defer rollback(tx)
 
-	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, true)
+	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, false)
 	switch {
-	case err == nil && !existing.Removed:
+	case err == nil:
 		return existing, ErrAlreadyExists
-	case err == nil && existing.Removed:
-		// Source identity is unique. If the previous row was soft-deleted, reuse its
-		// primary key instead of inserting another row with the same source identity.
-		now := time.Now().UTC()
-		document.ID = existing.ID
-		document.CreatedAt = now
-		document.UpdatedAt = now
-		document.Removed = false
-		if err := updateDocumentTx(ctx, tx, document); err != nil {
-			return Document{}, err
-		}
-		if err := replacePagesTx(ctx, tx, document.ID, document.Pages); err != nil {
-			return Document{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return Document{}, err
-		}
-		return document, nil
 	case err != nil && !errors.Is(err, ErrNotFound):
 		return Document{}, err
 	}
@@ -287,9 +354,9 @@ func (s *SQLiteStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	// Load pages after closing the document rows cursor. With one SQLite connection,
-	// keeping a cursor open while issuing another query can unnecessarily serialize
-	// or block follow-up statements.
+	// 在关闭文档行游标后加载页面。在只有一个 SQLite 连接的情况下，
+	// 在发出另一个查询时保持游标打开可能会造成不必要的序列化
+	// 或阻塞后续的语句。
 	for i := range result {
 		pages, err := listPagesTx(ctx, tx, result[i].ID)
 		if err != nil {
@@ -321,9 +388,9 @@ func (s *SQLiteStore) Update(ctx context.Context, id int, fn func(*Document) err
 	if err != nil {
 		return Document{}, err
 	}
-	// The callback runs inside the same transaction as the read and write. This
-	// keeps hook updates and status transitions from overwriting each other with
-	// stale document snapshots.
+	// 该回调在读写相同的事务中运行。这可以
+	// 防止钩子更新和状态转换使用陈旧的
+	// 文档快照相互覆盖。
 	if err := fn(&document); err != nil {
 		return Document{}, err
 	}
@@ -386,8 +453,8 @@ type documentScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanDocument maps the flat documents table into the public Document model.
-// Page rows are loaded separately by callers because they live in document_pages.
+// scanDocument 将扁平的 documents 表映射到公共的 Document 模型。
+// 页面行由调用者单独加载，因为它们存放在 document_pages 表中。
 func scanDocument(scanner documentScanner) (Document, error) {
 	var document Document
 	var source string
@@ -497,8 +564,8 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 		if err := rows.Scan(&page.Index, &page.Key, &page.ContentType, &page.Size); err != nil {
 			return nil, err
 		}
-		// Preserve direct page-index addressing: document.Pages[pageIndex] should
-		// resolve to that page even if a previous download left a gap.
+		// 保留直接通过页面索引寻址：即使之前的下载留下了空隙，
+		// document.Pages[pageIndex] 也应该能够解析到该页面。
 		if page.Index >= len(pages) {
 			pages = append(pages, make([]Page, page.Index-len(pages)+1)...)
 		}
@@ -511,8 +578,8 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 }
 
 func replacePagesTx(ctx context.Context, tx *sql.Tx, documentID int, pages []Page) error {
-	// Updates usually mutate a full Document value. Replacing page rows keeps the
-	// database in sync with that value and makes retries idempotent.
+	// 更新通常会改变完整的 Document 值。替换所有的页面行可以使
+	// 数据库与该值保持同步，并使重试操作具有幂等性。
 	if _, err := tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ?`, documentID); err != nil {
 		return err
 	}
@@ -536,8 +603,8 @@ func replacePagesTx(ctx context.Context, tx *sql.Tx, documentID int, pages []Pag
 }
 
 func rollback(tx *sql.Tx) {
-	// Rollback after Commit returns sql.ErrTxDone; the caller already handled the
-	// real error path, so this cleanup helper intentionally ignores it.
+	// 在 Commit 之后进行 Rollback 会返回 sql.ErrTxDone；调用者已经处理了
+	// 真正的错误路径，所以这个清理辅助函数故意忽略了该错误。
 	_ = tx.Rollback()
 }
 
