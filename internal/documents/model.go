@@ -22,17 +22,24 @@ type Progress struct {
 	Total int `json:"total"`
 }
 
+type Page struct {
+	Index       int    `json:"index"`
+	Key         string `json:"key"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+}
+
 type Document struct {
 	ID               int                 `json:"document_id"`
 	Source           sources.SourceType  `json:"source"`
 	SourceDocumentID string              `json:"source_document_id"`
 	SourceMeta       json.RawMessage     `json:"source_meta,omitempty"`
-	Title            string              `json:"title,omitempty"`
-	StorageBackend   storage.StorageName `json:"storage_backend,omitempty"`
+	Title            string              `json:"title"`
+	StorageBackend   storage.StorageName `json:"storage_backend"`
 	ArchiveStatus    ArchiveStatus       `json:"archive_status"`
 	Progress         Progress            `json:"progress"`
 	Error            string              `json:"error,omitempty"`
-	PageCount        int                 `json:"page_count,omitempty"`
+	Pages            []Page              `json:"pages"`
 	Removed          bool                `json:"removed"`
 	CreatedAt        time.Time           `json:"created_at"`
 	UpdatedAt        time.Time           `json:"updated_at"`

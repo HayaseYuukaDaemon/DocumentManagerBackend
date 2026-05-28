@@ -8,9 +8,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/maruel/natural"
 )
 
 const (
@@ -32,21 +35,17 @@ func NewResolver(client *http.Client) *Resolver {
 	return &Resolver{client: client}
 }
 
-type ResolvedComic struct {
-	Comic Comic
-	Pages []DownloadPage
+type Comic struct {
+	Comic   rawComic
+	RawJSON json.RawMessage
+	Pages   []DownloadPage
 }
 
-type Comic struct {
-	ID                StringID   `json:"id"`
-	Title             string     `json:"title"`
-	Type              string     `json:"type"`
-	Language          string     `json:"language"`
-	LanguageLocalName string     `json:"language_localname"`
-	Date              string     `json:"date"`
-	GalleryURL        string     `json:"galleryurl"`
-	Blocked           int        `json:"blocked"`
-	Files             []PageInfo `json:"files"`
+type rawComic struct {
+	ID         StringID
+	Title      string
+	GalleryURL string
+	Files      []PageInfo
 }
 
 type StringID string
@@ -67,11 +66,11 @@ func (id *StringID) UnmarshalJSON(data []byte) error {
 }
 
 type PageInfo struct {
-	Hash    string `json:"hash"`
-	Width   int    `json:"width"`
-	Height  int    `json:"height"`
-	Name    string `json:"name"`
-	HasAVIF int    `json:"hasavif"`
+	Hash    string
+	Width   int
+	Height  int
+	Name    string
+	HasAVIF int
 }
 
 type DownloadPage struct {
@@ -91,29 +90,79 @@ type GGInfo struct {
 	Default int
 }
 
-func (r *Resolver) Resolve(ctx context.Context, galleryID string) (ResolvedComic, error) {
-	comic, err := r.FetchComic(ctx, galleryID)
-	if err != nil {
-		return ResolvedComic{}, err
+func (r *Resolver) DownloadPage(ctx context.Context, page DownloadPage, w io.Writer) error {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, page.URL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "document-archive/0.1")
+		if page.Referer != "" {
+			req.Header.Set("Referer", page.Referer)
+		} else {
+			req.Header.Set("Referer", hitomiReferer+"/")
+		}
+
+		resp, err := r.client.Do(req)
+		if err != nil {
+			lastErr = err
+			sleepBeforeRetry(ctx, attempt)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			return fmt.Errorf("page not found: %s", page.URL)
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			defer resp.Body.Close()
+			_, err = io.Copy(w, resp.Body)
+			return err
+		}
+
+		lastErr = fmt.Errorf("GET %s returned %s", page.URL, resp.Status)
+		resp.Body.Close()
+		sleepBeforeRetry(ctx, attempt)
 	}
 
-	gg, err := r.FetchGG(ctx)
-	if err != nil {
-		return ResolvedComic{}, err
+	if lastErr == nil {
+		lastErr = errors.New("request failed")
 	}
-
-	pages, err := DecodeDownloadPages(comic, gg)
-	if err != nil {
-		return ResolvedComic{}, err
-	}
-
-	return ResolvedComic{
-		Comic: comic,
-		Pages: pages,
-	}, nil
+	return lastErr
 }
 
-func (r *Resolver) FetchComic(ctx context.Context, galleryID string) (Comic, error) {
+func (r *Resolver) ResolveComic(ctx context.Context, comic Comic) (Comic, error) {
+	gg, err := r.FetchGG(ctx)
+	if err != nil {
+		return Comic{}, err
+	}
+
+	pages, err := DecodeDownloadPages(comic.Comic, gg)
+	if err != nil {
+		return Comic{}, err
+	}
+	slices.SortFunc(pages, func(page1, page2 DownloadPage) int {
+		return natural.Compare(page1.Name, page2.Name)
+	})
+	comic.Pages = pages
+	return comic, nil
+}
+
+func (r *Resolver) ResolveID(ctx context.Context, galleryID string) (Comic, error) {
+	comic, err := r.fetchComic(ctx, galleryID)
+	if err != nil {
+		return Comic{}, err
+	}
+	return r.ResolveComic(ctx, comic)
+}
+
+func (r *Resolver) fetchComic(ctx context.Context, galleryID string) (Comic, error) {
 	galleryID = strings.TrimSpace(galleryID)
 	if galleryID == "" {
 		return Comic{}, errors.New("gallery id is required")
@@ -123,7 +172,11 @@ func (r *Resolver) FetchComic(ctx context.Context, galleryID string) (Comic, err
 	if err != nil {
 		return Comic{}, err
 	}
-	return ParseGalleryInfo(raw)
+	rawJSON, err := parseGalleryInfo(raw)
+	if err != nil {
+		return Comic{}, err
+	}
+	return DeserializeGalleryInfo(rawJSON)
 }
 
 func (r *Resolver) FetchGG(ctx context.Context) (GGInfo, error) {
@@ -135,25 +188,31 @@ func (r *Resolver) FetchGG(ctx context.Context) (GGInfo, error) {
 	return ParseGG(raw)
 }
 
-func ParseGalleryInfo(raw string) (Comic, error) {
+func DeserializeGalleryInfo(raw json.RawMessage) (Comic, error) {
+	comic := Comic{}
+	rC := rawComic{}
+	if err := json.Unmarshal(raw, &rC); err != nil {
+		return Comic{}, fmt.Errorf("decode galleryinfo: %w", err)
+	}
+	comic.RawJSON = raw
+	comic.Comic = rC
+	if len(comic.Comic.Files) == 0 {
+		return Comic{}, errors.New("galleryinfo has no files")
+	}
+	return comic, nil
+}
+
+func parseGalleryInfo(raw string) (json.RawMessage, error) {
 	if !strings.Contains(raw, "galleryinfo") {
-		return Comic{}, errors.New("galleryinfo not found")
+		return json.RawMessage{}, errors.New("galleryinfo not found")
 	}
 
 	start := strings.Index(raw, "{")
 	end := strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
-		return Comic{}, errors.New("galleryinfo json object not found")
+		return json.RawMessage{}, errors.New("galleryinfo json object not found")
 	}
-
-	var comic Comic
-	if err := json.Unmarshal([]byte(raw[start:end+1]), &comic); err != nil {
-		return Comic{}, fmt.Errorf("decode galleryinfo: %w", err)
-	}
-	if len(comic.Files) == 0 {
-		return Comic{}, errors.New("galleryinfo has no files")
-	}
-	return comic, nil
+	return json.RawMessage(raw[start : end+1]), nil
 }
 
 func ParseGG(raw string) (GGInfo, error) {
@@ -213,7 +272,7 @@ func ParseGG(raw string) (GGInfo, error) {
 	return info, nil
 }
 
-func DecodeDownloadPages(comic Comic, gg GGInfo) ([]DownloadPage, error) {
+func DecodeDownloadPages(comic rawComic, gg GGInfo) ([]DownloadPage, error) {
 	pages := make([]DownloadPage, 0, len(comic.Files))
 	for index, file := range comic.Files {
 		url, err := DownloadURL(file.Hash, gg, "webp")

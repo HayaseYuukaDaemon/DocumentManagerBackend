@@ -31,13 +31,21 @@ func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage s
 	}
 }
 
-func (a *App) onPageDownloaded(ctx context.Context, documentID int, page Page) error {
-	document, err := a.documents.Get(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	document.Progress.Done++
-	err = a.documents.Update(ctx, document)
+func (a *App) onPageDownloaded(ctx context.Context, documentID int, page documents.Page) error {
+	_, err := a.documents.Update(ctx, documentID, func(document *documents.Document) error {
+		index := page.Index
+		if index >= len(document.Pages) {
+			if index >= cap(document.Pages) {
+				newPages := make([]documents.Page, len(document.Pages), index+1)
+				copy(newPages, document.Pages)
+				document.Pages = newPages
+			}
+			document.Pages = document.Pages[:index+1]
+		}
+		document.Pages[index] = page
+		document.Progress.Done++
+		return nil
+	})
 	return err
 }
 
@@ -89,7 +97,26 @@ func (a *App) GetDocument(ctx context.Context, id int) (documents.Document, erro
 }
 
 func (a *App) GetPage(ctx context.Context, document documents.Document, pageIndex int) (PageResult, error) {
-	return PageResult{}, nil
+	storage, err := a.getStorage(document.StorageBackend)
+	if err != nil {
+		return PageResult{}, err
+	}
+	pagesLen := len(document.Pages)
+	if pageIndex >= pagesLen {
+		return PageResult{}, fmt.Errorf("page index out of bounds")
+	}
+	page := document.Pages[pageIndex]
+	if storage.StorageName() == "memory" {
+		pageObject, err := storage.GetObject(ctx, page.Key)
+		if err != nil {
+			return PageResult{}, fmt.Errorf("failed to get page object: %w", err)
+		}
+		return PageResult{
+			Kind:   PageResultObject,
+			Object: pageObject,
+		}, nil
+	}
+	return PageResult{}, fmt.Errorf("unsupported storage backend")
 }
 
 func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
@@ -117,12 +144,16 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 
 	switch mode {
 	case documents.OnlyMetaData:
-		document.ArchiveStatus = documents.StatusQueued
-		err = a.documents.Update(ctx, document)
+		_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+			document.ArchiveStatus = documents.StatusQueued
+			return nil
+		})
 	case documents.All:
-		document.ArchiveStatus = documents.StatusQueued
-		document.Progress.Done = 0
-		err = a.documents.Update(ctx, document)
+		_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+			document.ArchiveStatus = documents.StatusQueued
+			document.Progress.Done = 0
+			return nil
+		})
 	default:
 		return documents.Document{}, fmt.Errorf("invalid refresh mode: %s", mode)
 	}
@@ -156,52 +187,67 @@ func (a *App) processQueued(ctx context.Context) {
 
 	for _, document := range queued {
 		a.logger.Info("processing document archive", "document_id", document.ID, "source", document.Source)
-		if _, err := a.processDocument(ctx, document); err != nil {
+		if _, err := a.processDocument(ctx, document.ID); err != nil {
 			a.logger.Warn("process document archive failed", "document_id", document.ID, "error", err)
 		}
+		a.logger.Info("document process done", "document_id", document.ID)
 	}
 }
 
-func (a *App) processDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
+func (a *App) processDocument(ctx context.Context, id int) (documents.Document, error) {
+	document, err := a.documents.Get(ctx, id)
+	if err != nil {
+		return documents.Document{}, err
+	}
+
 	handler, err := a.getSource(document.Source)
 	if err != nil {
-		return a.failDocument(ctx, document, err)
+		return a.failDocument(ctx, id, err)
 	}
 	objectStorage, err := a.getStorage(document.StorageBackend)
 	if err != nil {
-		return a.failDocument(ctx, document, err)
+		return a.failDocument(ctx, id, err)
 	}
-	document.ArchiveStatus = documents.StatusResolving
-	err = a.documents.Update(ctx, document)
+
+	_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+		document.ArchiveStatus = documents.StatusResolving
+		return nil
+	})
 	if err != nil {
-		return a.failDocument(ctx, document, err)
+		return a.failDocument(ctx, id, err)
 	}
 	manifest, err := handler.ArchiveManifest(ctx, document, objectStorage)
 	if err != nil {
-		return a.failDocument(ctx, document, err)
+		return a.failDocument(ctx, id, err)
 	}
 
 	if document.Progress.Done == 0 {
-		document.ArchiveStatus = documents.StatusDownloading
-		err = a.documents.Update(ctx, document)
+		document, err = a.documents.Update(ctx, id, func(d *documents.Document) error {
+			d.ArchiveStatus = documents.StatusDownloading
+			d.SourceMeta = manifest.SourceMeta
+			return nil
+		})
 		if err != nil {
-			return a.failDocument(ctx, document, err)
+			return a.failDocument(ctx, id, err)
 		}
 		err = handler.ArchiveContent(ctx, document, objectStorage)
 		if err != nil {
-			return a.failDocument(ctx, document, err)
+			return a.failDocument(ctx, id, err)
+		}
+		_, err := handler.ArchiveManifest(ctx, document, objectStorage)
+		if err != nil {
+			return a.failDocument(ctx, id, err)
 		}
 	}
 
-	document.ArchiveStatus = documents.StatusArchived
-	document.Progress.Done = manifest.PageCount
-	document.Progress.Total = manifest.PageCount
-	document.PageCount = manifest.PageCount
-	document.Error = ""
-	if manifest.Title != "" {
-		document.Title = manifest.Title
-	}
-	err = a.documents.Update(ctx, document)
+	_, err = a.documents.Update(ctx, id, func(d *documents.Document) error {
+		if manifest.Title != "" {
+			d.Title = manifest.Title
+		}
+		d.ArchiveStatus = documents.StatusArchived
+		d.Error = ""
+		return nil
+	})
 	if err != nil {
 		return documents.Document{}, err
 	}
@@ -224,10 +270,12 @@ func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStor
 	return objectStorage, nil
 }
 
-func (a *App) failDocument(ctx context.Context, document documents.Document, cause error) (documents.Document, error) {
-	document.ArchiveStatus = documents.StatusFailed
-	document.Error = cause.Error()
-	err := a.documents.Update(ctx, document)
+func (a *App) failDocument(ctx context.Context, id int, cause error) (documents.Document, error) {
+	document, err := a.documents.Update(ctx, id, func(d *documents.Document) error {
+		d.ArchiveStatus = documents.StatusFailed
+		d.Error = cause.Error()
+		return nil
+	})
 	if err != nil {
 		return document, err
 	}

@@ -17,19 +17,17 @@ type Store interface {
 	GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error)
 	Remove(ctx context.Context, id int) (Document, error)
 	ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error)
-	Update(ctx context.Context, document Document) error
+	Update(ctx context.Context, id int, fn func(*Document) error) (Document, error)
 }
 
 type MemoryStore struct {
-	mu        sync.RWMutex
-	idMap     []Document
-	sourceMap map[sources.SourceType]map[string]int
+	mu    sync.RWMutex
+	idMap []Document
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		idMap:     make([]Document, 0, 10),
-		sourceMap: make(map[sources.SourceType]map[string]int),
+		idMap: make([]Document, 0, 10),
 	}
 }
 
@@ -43,7 +41,11 @@ func (s *MemoryStore) Get(ctx context.Context, id int) (Document, error) {
 	if id < 0 || id >= len(s.idMap) {
 		return Document{}, ErrNotFound
 	}
-	return s.idMap[id], nil
+	d := s.idMap[id]
+	if d.Removed {
+		return Document{}, ErrNotFound
+	}
+	return d, nil
 }
 
 func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error) {
@@ -53,15 +55,12 @@ func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	sourceDocuments := s.sourceMap[source]
-	if sourceDocuments == nil {
-		return Document{}, ErrNotFound
+	for _, d := range s.idMap {
+		if d.Source == source && d.SourceDocumentID == sourceDocumentID {
+			return d, nil
+		}
 	}
-	id, exists := sourceDocuments[sourceDocumentID]
-	if !exists || id < 0 || id >= len(s.idMap) {
-		return Document{}, ErrNotFound
-	}
-	return s.idMap[id], nil
+	return Document{}, ErrNotFound
 }
 
 func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, error) {
@@ -71,24 +70,25 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.sourceMap[document.Source] == nil {
-		s.sourceMap[document.Source] = make(map[string]int)
-	}
-
-	if id, exists := s.sourceMap[document.Source][document.SourceDocumentID]; exists {
-		if id >= 0 && id < len(s.idMap) {
-			return s.idMap[id], nil
+	document.ID = len(s.idMap)
+	for _, d := range s.idMap {
+		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID {
+			if d.Removed == false {
+				return Document{}, errors.New("document already exists")
+			}
+			document.ID = d.ID
 		}
-		delete(s.sourceMap[document.Source], document.SourceDocumentID)
 	}
 
 	now := time.Now().UTC()
-	document.ID = len(s.idMap)
+
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	s.idMap = append(s.idMap, document)
-	s.sourceMap[document.Source][document.SourceDocumentID] = document.ID
+	if document.ID == len(s.idMap) {
+		s.idMap = append(s.idMap, document)
+	} else {
+		s.idMap[document.ID] = document
+	}
 	return document, nil
 }
 
@@ -133,34 +133,23 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	return result, nil
 }
 
-func (s *MemoryStore) Update(ctx context.Context, document Document) error {
+func (s *MemoryStore) Update(ctx context.Context, id int, fn func(*Document) error) (Document, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return Document{}, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if document.ID < 0 || document.ID >= len(s.idMap) {
-		return ErrNotFound
+	if id < 0 || id >= len(s.idMap) {
+		return Document{}, ErrNotFound
 	}
 
-	current := s.idMap[document.ID]
-	if current.Source != document.Source || current.SourceDocumentID != document.SourceDocumentID {
-		if sourceDocuments := s.sourceMap[document.Source]; sourceDocuments != nil {
-			if existingID, exists := sourceDocuments[document.SourceDocumentID]; exists && existingID != document.ID {
-				return errors.New("document source mapping already exists")
-			}
-		}
-		if sourceDocuments := s.sourceMap[current.Source]; sourceDocuments != nil {
-			delete(sourceDocuments, current.SourceDocumentID)
-		}
-		if s.sourceMap[document.Source] == nil {
-			s.sourceMap[document.Source] = make(map[string]int)
-		}
-		s.sourceMap[document.Source][document.SourceDocumentID] = document.ID
+	document := &s.idMap[id]
+
+	if err := fn(document); err != nil {
+		return Document{}, err
 	}
 
 	document.UpdatedAt = time.Now().UTC()
-	s.idMap[document.ID] = document
-	return nil
+	return *document, nil
 }

@@ -28,8 +28,8 @@ func TestMemoryStoreCreateIsIdempotent(t *testing.T) {
 		SourceDocumentID: "abc",
 		ArchiveStatus:    StatusQueued,
 	})
-	if err != nil {
-		t.Fatalf("second Create returned error: %v", err)
+	if err == nil {
+		t.Fatalf("second Create should have returned error: %v", err)
 	}
 
 	if first.ID != 0 {
@@ -61,7 +61,7 @@ func TestMemoryStoreBoundsChecks(t *testing.T) {
 	if _, err := store.Remove(ctx, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for remove missing, got %v", err)
 	}
-	if err := store.Update(ctx, Document{ID: 0}); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Update(ctx, 0, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for update missing, got %v", err)
 	}
 }
@@ -79,8 +79,10 @@ func TestMemoryStoreUpdateMaintainsSourceIndex(t *testing.T) {
 		t.Fatalf("Create returned error: %v", err)
 	}
 
-	doc.SourceDocumentID = "new"
-	err = store.Update(ctx, doc)
+	_, err = store.Update(ctx, doc.ID, func(d *Document) error {
+		d.SourceDocumentID = "new"
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
