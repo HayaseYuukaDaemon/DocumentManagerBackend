@@ -1,14 +1,15 @@
 # TODO
 
-## Near Term
+## 近期计划
 
-- Change `replacePagesTx` to `upsertPagesTx`.
-  - Use `(document_id, page_index)` as the page identity.
-  - Insert pages that do not exist, update pages that already exist, and keep existing pages that are not included in the current update.
-  - Persist `Page.Hash` in SQLite so download validation can reuse existing page metadata.
-- Review `internal/documents/sqlite_store.go`.
-  - Check transaction boundaries, page update semantics, timestamp updates, and duplicated helper logic.
-  - Confirm document updates cannot accidentally erase existing page rows.
-- Implement `S3Storage`.
-  - Compare the current `ObjectStore` interface against S3 semantics before coding.
-  - Add configuration for endpoint, bucket, region, credentials, and path-style/virtual-host style behavior.
+- 围绕“保留现有页面行”重新设计页面更新语义。
+  - 不要仅为了这个目标就在通用 document model/store 中持久化或维护每个 document page 的 hash。
+  - page 的 “hash” 应理解为来源侧的页面变更标识，不一定是狭义的加密哈希；只要能针对该 source 判断页面是否变动即可。
+  - 在 document update 的 prestage 中记录现有 pages，并与 update 后的 pages 对比，用来决定哪些页面行需要插入/更新、哪些已有页面行应保留。
+  - 可以考虑新增显式的 `AddPage`/页面更新方法，避免把增量页面写入都塞进整份 document 的 `Update`。
+- 复查 `internal/documents/sqlite_store.go`。
+  - 检查事务边界、页面更新语义、时间戳更新，以及重复 helper 逻辑。
+  - 确认 document update 不会意外擦掉已有页面行。
+- 实现 `S3Storage`。
+  - 编码前先对比当前 `ObjectStore` 接口与 S3 语义是否匹配。
+  - 增加 endpoint、bucket、region、credentials，以及 path-style/virtual-host style 行为的配置。

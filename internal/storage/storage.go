@@ -27,7 +27,7 @@ type Object struct {
 
 type ObjectStore interface {
 	StorageName() StorageName
-	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
+	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (ObjectInfo, error)
 	GetObject(ctx context.Context, key string) (Object, error)
 	HeadObject(ctx context.Context, key string) (ObjectInfo, error)
 	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)

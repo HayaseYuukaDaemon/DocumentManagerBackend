@@ -230,7 +230,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		if err != nil {
 			return a.failDocument(ctx, id, err)
 		}
-		err = handler.ArchiveContent(ctx, document, objectStorage)
+		_, err = handler.ArchiveContent(ctx, document, objectStorage)
 		if err != nil {
 			return a.failDocument(ctx, id, err)
 		}

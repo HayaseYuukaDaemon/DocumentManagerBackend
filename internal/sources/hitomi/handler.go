@@ -37,40 +37,54 @@ func (h *Handler) Source() sources.SourceType {
 	return SourceTypeHitomi
 }
 
-func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
+func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
 	comic, err := DeserializeGalleryInfo(document.SourceMeta)
 	if err != nil {
-		return fmt.Errorf("failed to deserialize gallery info: %w", err)
+		return nil, fmt.Errorf("failed to deserialize gallery info: %w", err)
 	}
 	resolvedComic, err := h.resolver.ResolveComic(ctx, comic)
 	if err != nil {
-		return fmt.Errorf("failed to resolve comic: %w", err)
+		return nil, fmt.Errorf("failed to resolve comic: %w", err)
 	}
+	pageLength := len(document.Pages)
+	var archivedPages []documents.Page
 	for index, page := range resolvedComic.Pages {
-		buf := bytes.Buffer{}
-		err := h.resolver.DownloadPage(ctx, page, &buf)
-		if err != nil {
-			return fmt.Errorf("failed to download page %d: %w", index, err)
-		}
 		key := archive.PageObjectKey(strconv.Itoa(document.ID), index, page.ContentType)
-		size := int64(buf.Len())
-		err = objects.PutObject(ctx, key, &buf, int64(buf.Len()), page.ContentType)
+		if pageLength > 0 && index < pageLength {
+			oldPage := document.Pages[index]
+			if err == nil {
+				if page.Hash == oldPage.Hash {
+					continue
+				}
+			}
+		}
+
+		buf := bytes.Buffer{}
+		err = h.resolver.DownloadPage(ctx, page, &buf)
 		if err != nil {
-			return fmt.Errorf("failed to put object: %w", err)
+			return archivedPages, fmt.Errorf("failed to download page %d: %w", index, err)
+		}
+
+		size := int64(buf.Len())
+		_, err = objects.PutObject(ctx, key, &buf, int64(buf.Len()), page.ContentType)
+		if err != nil {
+			return archivedPages, fmt.Errorf("failed to put object: %w", err)
 		}
 		docPage := documents.Page{
 			Index:       index,
 			Key:         key,
 			ContentType: page.ContentType,
 			Size:        size,
+			Hash:        page.Hash,
 		}
 		if h.pageDownloadHook != nil {
 			if err := h.pageDownloadHook(ctx, document.ID, docPage); err != nil {
-				return fmt.Errorf("failed to execute page download hook: %w", err)
+				return archivedPages, fmt.Errorf("failed to execute page download hook: %w", err)
 			}
 		}
+		archivedPages = append(archivedPages, docPage)
 	}
-	return nil
+	return archivedPages, nil
 }
 
 func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) (archive.Manifest, error) {
@@ -83,7 +97,7 @@ func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Docume
 	if err != nil {
 		return archive.Manifest{}, fmt.Errorf("failed to marshal document: %w", err)
 	}
-	err = objects.PutObject(ctx, key, bytes.NewReader(docJSON), int64(len(docJSON)), "json")
+	_, err = objects.PutObject(ctx, key, bytes.NewReader(docJSON), int64(len(docJSON)), "json")
 	if err != nil {
 		return archive.Manifest{}, fmt.Errorf("failed to put object: %w", err)
 	}

@@ -128,7 +128,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	switch {
 	case err == nil:
 		return existing, ErrAlreadyExists
-	case err != nil && !errors.Is(err, ErrNotFound):
+	case !errors.Is(err, ErrNotFound):
 		return Document{}, err
 	}
 

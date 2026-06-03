@@ -27,6 +27,7 @@ type Page struct {
 	Key         string `json:"key"`
 	ContentType string `json:"content_type"`
 	Size        int64  `json:"size"`
+	Hash        string `json:"hash,omitempty"`
 }
 
 type Document struct {

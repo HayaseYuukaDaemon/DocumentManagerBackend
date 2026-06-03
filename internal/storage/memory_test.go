@@ -13,7 +13,7 @@ func TestMemoryStorePutHeadAndPresign(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
 
-	err := store.PutObject(ctx, "documents/test/pages/000001.webp", strings.NewReader("page"), 4, "image/webp")
+	_, err := store.PutObject(ctx, "documents/test/pages/000001.webp", strings.NewReader("page"), 4, "image/webp")
 	if err != nil {
 		t.Fatalf("PutObject returned error: %v", err)
 	}

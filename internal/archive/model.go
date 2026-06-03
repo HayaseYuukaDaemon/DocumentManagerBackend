@@ -35,7 +35,7 @@ type PageResult struct {
 
 type SourceHandler interface {
 	Source() sources.SourceType
-	ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) error
+	ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error)
 	ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) (Manifest, error)
 	RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error
 }

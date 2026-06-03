@@ -38,20 +38,20 @@ func (s *MemoryStore) StorageName() StorageName {
 	return s.storageName
 }
 
-func (s *MemoryStore) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+func (s *MemoryStore) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return ObjectInfo{}, err
 	}
 	if key == "" {
-		return errors.New("object key is required")
+		return ObjectInfo{}, errors.New("object key is required")
 	}
 
 	content, err := io.ReadAll(body)
 	if err != nil {
-		return err
+		return ObjectInfo{}, err
 	}
 	if size >= 0 && int64(len(content)) != size {
-		return fmt.Errorf("object size mismatch: expected %d, got %d", size, len(content))
+		return ObjectInfo{}, fmt.Errorf("object size mismatch: expected %d, got %d", size, len(content))
 	}
 
 	sum := md5.Sum(content)
@@ -65,7 +65,12 @@ func (s *MemoryStore) PutObject(ctx context.Context, key string, body io.Reader,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.objects[key] = object
-	return nil
+	return ObjectInfo{
+		Key:         key,
+		Size:        int64(len(object.content)),
+		ContentType: object.contentType,
+		ETag:        object.etag,
+	}, nil
 }
 
 func (s *MemoryStore) GetObject(ctx context.Context, key string) (Object, error) {
