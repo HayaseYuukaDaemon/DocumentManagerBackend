@@ -3,16 +3,19 @@ package documents
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"document-archive/internal/sources"
+	"document-archive/internal/utils"
 )
 
 var ErrNotFound = errors.New("document not found")
 var ErrAlreadyExists = errors.New("document already exists")
+var ErrPageNotFound = errors.New("page not found")
+var ErrPageAlreadyExists = errors.New("page already exists")
 
-// 这里UpdateMeta里必须实现pages检查逻辑，并拒绝pages修改
 type Store interface {
 	Create(ctx context.Context, document Document) (Document, error)
 	Get(ctx context.Context, id int) (Document, error)
@@ -82,12 +85,30 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 
 	now := time.Now().UTC()
 
+	pages := document.Pages
+	document.Pages = nil
+	document.Progress.Done = 0
+	for index, page := range pages {
+		if index != page.Index {
+			return Document{}, fmt.Errorf("page index mismatch: expected %d, got %d", index, page.Index)
+		}
+		if page.Index < 0 {
+			return Document{}, fmt.Errorf("invalid page index: %d", page.Index)
+		}
+	}
+
 	document.ID = len(s.idMap)
 	document.CreatedAt = now
 	document.UpdatedAt = now
 	document.Removed = false
 	s.idMap = append(s.idMap, document)
-	return document, nil
+
+	for index, page := range pages {
+		if err := s.addPageLocked(document.ID, page, now); err != nil {
+			return Document{}, utils.NewIndexedError(err, index)
+		}
+	}
+	return s.idMap[document.ID], nil
 }
 
 func (s *MemoryStore) Remove(ctx context.Context, id int) (Document, error) {
@@ -134,31 +155,12 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	return result, nil
 }
 
-func (s *MemoryStore) pageEqual(page1 Page, page2 Page) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if page1.ContentType != page2.ContentType {
-		return false, errors.New("page content type mismatch")
-	}
-	if page1.Hash != page2.Hash {
-		return false, errors.New("page hash mismatch")
-	}
-	if page1.Size != page2.Size {
-		return false, errors.New("page size mismatch")
-	}
-	if page1.Index != page2.Index {
-		return false, errors.New("page index mismatch")
-	}
-	if page1.Key != page2.Key {
-		return false, errors.New("page key mismatch")
-	}
-	return true, nil
-}
-
 func (s *MemoryStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
+	}
+	if fn == nil {
+		return Document{}, errors.New("document update callback is required")
 	}
 
 	s.mu.Lock()
@@ -166,33 +168,15 @@ func (s *MemoryStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentM
 	if id < 0 || id >= len(s.idMap) {
 		return Document{}, ErrNotFound
 	}
-	if fn == nil {
-		return Document{}, errors.New("document update callback is required")
-	}
 
 	document := &s.idMap[id]
-	documentMeta := &DocumentMeta{
-		SourceMeta:     document.SourceMeta,
-		Title:          document.Title,
-		StorageBackend: document.StorageBackend,
-		ArchiveStatus:  document.ArchiveStatus,
-		Progress:       document.Progress,
-		Error:          document.Error,
-		Removed:        document.Removed,
-	}
+	documentMeta := extractDocumentMeta(*document)
 
-	if err := fn(documentMeta); err != nil {
+	if err := fn(&documentMeta); err != nil {
 		return Document{}, err
 	}
 
-	document.SourceMeta = documentMeta.SourceMeta
-	document.Title = documentMeta.Title
-	document.StorageBackend = documentMeta.StorageBackend
-	document.ArchiveStatus = documentMeta.ArchiveStatus
-	document.Progress = documentMeta.Progress
-	document.Error = documentMeta.Error
-	document.Removed = documentMeta.Removed
-
+	fillDocumentMeta(document, documentMeta)
 	document.UpdatedAt = time.Now().UTC()
 	return *document, nil
 }
@@ -207,11 +191,7 @@ func (s *MemoryStore) AddPage(ctx context.Context, id int, page Page) error {
 	if id < 0 || id >= len(s.idMap) {
 		return ErrNotFound
 	}
-	// 这里添加的时候可以考虑一下是否需要检查页码是否已经存在，或者页码是否连续等逻辑，这里暂时不做处理，对于sqlite实现，需要做一下。
-	document := &s.idMap[id]
-	document.Pages = append(document.Pages, page)
-	document.UpdatedAt = time.Now().UTC()
-	return nil
+	return s.addPageLocked(id, page, time.Now().UTC())
 }
 
 func (s *MemoryStore) RemovePage(ctx context.Context, id int, pageIndex int) error {
@@ -222,14 +202,53 @@ func (s *MemoryStore) RemovePage(ctx context.Context, id int, pageIndex int) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id < 0 || id >= len(s.idMap) {
-		return ErrNotFound
+		return ErrPageNotFound
 	}
+	return s.removePageLocked(id, pageIndex, time.Now().UTC())
+}
+
+func (s *MemoryStore) addPageLocked(id int, page Page, now time.Time) error {
+	if page.Index < 0 {
+		return fmt.Errorf("invalid page index: %d", page.Index)
+	}
+
 	document := &s.idMap[id]
-	if pageIndex < 0 || pageIndex >= len(document.Pages) {
-		return errors.New("invalid page index")
+	if page.Index < len(document.Pages) && pageSlotExists(document.Pages[page.Index], page.Index) {
+		return ErrPageAlreadyExists
 	}
-	// 这里在sqlite实现直接移除就行了
-	document.Pages = append(document.Pages[:pageIndex], document.Pages[pageIndex+1:]...)
-	document.UpdatedAt = time.Now().UTC()
+	for len(document.Pages) <= page.Index {
+		document.Pages = append(document.Pages, Page{})
+	}
+	document.Pages[page.Index] = page
+	document.Progress.Done++
+	if document.Progress.Total < document.Progress.Done {
+		document.Progress.Total = document.Progress.Done
+	}
+	document.UpdatedAt = now
 	return nil
+}
+
+func (s *MemoryStore) removePageLocked(id int, pageIndex int, now time.Time) error {
+	document := &s.idMap[id]
+	if pageIndex < 0 || pageIndex >= len(document.Pages) || !pageSlotExists(document.Pages[pageIndex], pageIndex) {
+		return ErrPageNotFound
+	}
+
+	document.Pages[pageIndex] = Page{}
+	for len(document.Pages) > 0 {
+		lastIndex := len(document.Pages) - 1
+		if pageSlotExists(document.Pages[lastIndex], lastIndex) {
+			break
+		}
+		document.Pages = document.Pages[:lastIndex]
+	}
+	if document.Progress.Done > 0 {
+		document.Progress.Done--
+	}
+	document.UpdatedAt = now
+	return nil
+}
+
+func pageSlotExists(page Page, index int) bool {
+	return page.Index == index && page.Key != ""
 }

@@ -441,7 +441,7 @@ func (s *SQLiteStore) removePage(ctx context.Context, id int, pageIndex int, tx 
 		return err
 	}
 	if cnt == 0 {
-		return errors.New("page not found")
+		return ErrPageNotFound
 	}
 	_, err = s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
 		if meta.Progress.Done > 0 {
