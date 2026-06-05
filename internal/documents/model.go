@@ -18,7 +18,7 @@ const (
 )
 
 type Progress struct {
-	Done  int `json:"done"`
+	Done  int `json:"done"` // 这个应该是由store维护的，外部不应该修改（AddPage时自动加1，RemovePage时自动减1）
 	Total int `json:"total"`
 }
 
@@ -44,6 +44,16 @@ type Document struct {
 	Removed          bool                `json:"removed"`
 	CreatedAt        time.Time           `json:"created_at"`
 	UpdatedAt        time.Time           `json:"updated_at"`
+}
+
+type DocumentMeta struct {
+	SourceMeta     json.RawMessage
+	Title          string
+	StorageBackend storage.StorageName
+	ArchiveStatus  ArchiveStatus
+	Progress       Progress
+	Error          string
+	Removed        bool
 }
 
 type RequestDocumentInput struct {

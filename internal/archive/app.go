@@ -32,21 +32,13 @@ func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage s
 }
 
 func (a *App) onPageDownloaded(ctx context.Context, documentID int, page documents.Page) error {
-	_, err := a.documents.Update(ctx, documentID, func(document *documents.Document) error {
-		index := page.Index
-		if index >= len(document.Pages) {
-			if index >= cap(document.Pages) {
-				newPages := make([]documents.Page, len(document.Pages), index+1)
-				copy(newPages, document.Pages)
-				document.Pages = newPages
-			}
-			document.Pages = document.Pages[:index+1]
-		}
-		document.Pages[index] = page
-		document.Progress.Done++
-		return nil
+	return a.documents.AddPage(ctx, documentID, documents.Page{
+		Index:       page.Index,
+		Key:         page.Key,
+		ContentType: page.ContentType,
+		Size:        page.Size,
+		Hash:        page.Hash,
 	})
-	return err
 }
 
 func (a *App) RegisterSource(handler SourceHandler) error {
@@ -144,12 +136,12 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 
 	switch mode {
 	case documents.OnlyMetaData:
-		_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+		_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
 			document.ArchiveStatus = documents.StatusQueued
 			return nil
 		})
 	case documents.All:
-		_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+		_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
 			document.ArchiveStatus = documents.StatusQueued
 			document.Progress.Done = 0
 			return nil
@@ -209,7 +201,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		return a.failDocument(ctx, id, err)
 	}
 
-	_, err = a.documents.Update(ctx, id, func(document *documents.Document) error {
+	_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
 		document.ArchiveStatus = documents.StatusResolving
 		return nil
 	})
@@ -222,7 +214,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	}
 
 	if document.Progress.Done == 0 {
-		document, err = a.documents.Update(ctx, id, func(d *documents.Document) error {
+		document, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
 			d.ArchiveStatus = documents.StatusDownloading
 			d.SourceMeta = manifest.SourceMeta
 			return nil
@@ -240,7 +232,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		}
 	}
 
-	_, err = a.documents.Update(ctx, id, func(d *documents.Document) error {
+	_, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
 		if manifest.Title != "" {
 			d.Title = manifest.Title
 		}
@@ -271,7 +263,7 @@ func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStor
 }
 
 func (a *App) failDocument(ctx context.Context, id int, cause error) (documents.Document, error) {
-	document, err := a.documents.Update(ctx, id, func(d *documents.Document) error {
+	document, err := a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
 		d.ArchiveStatus = documents.StatusFailed
 		d.Error = cause.Error()
 		return nil

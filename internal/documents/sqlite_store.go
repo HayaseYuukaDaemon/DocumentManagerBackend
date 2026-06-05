@@ -11,6 +11,7 @@ import (
 
 	"document-archive/internal/sources"
 	"document-archive/internal/storage"
+	"document-archive/internal/utils"
 
 	_ "modernc.org/sqlite"
 )
@@ -85,6 +86,7 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			object_key TEXT NOT NULL,
 			content_type TEXT NOT NULL,
 			size INTEGER NOT NULL,
+			hash TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY(document_id, page_index),
 			FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 		)`,
@@ -137,6 +139,10 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	document.UpdatedAt = now
 	document.Removed = false
 
+	pages := document.Pages
+	document.Pages = nil
+	document.Progress.Done = 0
+
 	result, err := tx.ExecContext(ctx, `INSERT INTO documents (
 		source, source_document_id, source_meta, title, storage_backend, archive_status,
 		progress_done, progress_total, error, removed, created_at, updated_at
@@ -163,9 +169,21 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	}
 	document.ID = int(id)
 
-	if err := replacePagesTx(ctx, tx, document.ID, document.Pages); err != nil {
+	for index, page := range pages {
+		if index != page.Index {
+			return Document{}, fmt.Errorf("page index mismatch: expected %d, got %d", index, page.Index)
+		}
+		err = s.addPage(ctx, document.ID, page, tx)
+		if err != nil {
+			return Document{}, utils.NewIndexedError(err, index)
+		}
+	}
+
+	document, err = getTx(ctx, tx, document.ID, true)
+	if err != nil {
 		return Document{}, err
 	}
+
 	if err := tx.Commit(); err != nil {
 		return Document{}, err
 	}
@@ -295,7 +313,51 @@ func (s *SQLiteStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	return result, nil
 }
 
-func (s *SQLiteStore) Update(ctx context.Context, id int, fn func(*Document) error) (Document, error) {
+func extractDocumentMeta(document Document) DocumentMeta {
+	return DocumentMeta{
+		SourceMeta:     document.SourceMeta,
+		Title:          document.Title,
+		StorageBackend: document.StorageBackend,
+		ArchiveStatus:  document.ArchiveStatus,
+		Progress:       document.Progress,
+		Error:          document.Error,
+		Removed:        document.Removed,
+	}
+}
+
+func fillDocumentMeta(document *Document, meta DocumentMeta) {
+	document.SourceMeta = meta.SourceMeta
+	document.Title = meta.Title
+	document.StorageBackend = meta.StorageBackend
+	document.ArchiveStatus = meta.ArchiveStatus
+	document.Progress = meta.Progress
+	document.Error = meta.Error
+	document.Removed = meta.Removed
+}
+
+func (s *SQLiteStore) updateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error, tx *sql.Tx) (Document, error) {
+	document, err := getTx(ctx, tx, id, true)
+	if err != nil {
+		return Document{}, err
+	}
+	// 该回调在读写相同的事务中运行。这可以
+	// 防止钩子更新和状态转换使用陈旧的
+	// 文档快照相互覆盖。
+	meta := extractDocumentMeta(document)
+	if err := fn(&meta); err != nil {
+		return Document{}, err
+	}
+	fillDocumentMeta(&document, meta)
+	document.ID = id
+	document.UpdatedAt = time.Now().UTC()
+
+	if err := updateDocumentTx(ctx, tx, document); err != nil {
+		return Document{}, err
+	}
+	return document, nil
+}
+
+func (s *SQLiteStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
@@ -309,29 +371,109 @@ func (s *SQLiteStore) Update(ctx context.Context, id int, fn func(*Document) err
 	}
 	defer rollback(tx)
 
-	document, err := getTx(ctx, tx, id, true)
+	document, err := s.updateMeta(ctx, id, fn, tx)
 	if err != nil {
 		return Document{}, err
 	}
-	// 该回调在读写相同的事务中运行。这可以
-	// 防止钩子更新和状态转换使用陈旧的
-	// 文档快照相互覆盖。
-	if err := fn(&document); err != nil {
-		return Document{}, err
-	}
-	document.ID = id
-	document.UpdatedAt = time.Now().UTC()
 
-	if err := updateDocumentTx(ctx, tx, document); err != nil {
-		return Document{}, err
-	}
-	if err := replacePagesTx(ctx, tx, document.ID, document.Pages); err != nil {
-		return Document{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return Document{}, err
 	}
 	return document, nil
+}
+
+func (s *SQLiteStore) addPage(ctx context.Context, id int, page Page, tx *sql.Tx) error {
+	_, err := s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
+		meta.Progress.Done++
+		if meta.Progress.Total < meta.Progress.Done {
+			meta.Progress.Total = meta.Progress.Done
+		}
+		return nil
+	}, tx)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO document_pages (
+		document_id, page_index, object_key, content_type, size, hash
+	) VALUES (?, ?, ?, ?, ?, ?)`,
+		id,
+		page.Index,
+		page.Key,
+		page.ContentType,
+		page.Size,
+		page.Hash,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) AddPage(ctx context.Context, id int, page Page) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	err = s.addPage(ctx, id, page, tx)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) removePage(ctx context.Context, id int, pageIndex int, tx *sql.Tx) error {
+	result, err := tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ? AND page_index = ?`, id, pageIndex)
+	if err != nil {
+		return err
+	}
+	cnt, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if cnt == 0 {
+		return errors.New("page not found")
+	}
+	_, err = s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
+		if meta.Progress.Done > 0 {
+			meta.Progress.Done--
+		}
+		return nil
+	}, tx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RemovePage(ctx context.Context, id int, pageIndex int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	err = s.removePage(ctx, id, pageIndex, tx)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func getTx(ctx context.Context, tx *sql.Tx, id int, includeRemoved bool) (Document, error) {
@@ -474,7 +616,7 @@ func updateDocumentTx(ctx context.Context, tx *sql.Tx, document Document) error 
 }
 
 func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT page_index, object_key, content_type, size
+	rows, err := tx.QueryContext(ctx, `SELECT page_index, object_key, content_type, size, hash
 		FROM document_pages
 		WHERE document_id = ?
 		ORDER BY page_index`, documentID)
@@ -486,7 +628,7 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 	pages := make([]Page, 0)
 	for rows.Next() {
 		var page Page
-		if err := rows.Scan(&page.Index, &page.Key, &page.ContentType, &page.Size); err != nil {
+		if err := rows.Scan(&page.Index, &page.Key, &page.ContentType, &page.Size, &page.Hash); err != nil {
 			return nil, err
 		}
 		// 保留直接通过页面索引寻址：即使之前的下载留下了空隙，
@@ -500,31 +642,6 @@ func listPagesTx(ctx context.Context, tx *sql.Tx, documentID int) ([]Page, error
 		return nil, err
 	}
 	return pages, nil
-}
-
-func replacePagesTx(ctx context.Context, tx *sql.Tx, documentID int, pages []Page) error {
-	// 更新通常会改变完整的 Document 值。替换所有的页面行可以使
-	// 数据库与该值保持同步，并使重试操作具有幂等性。
-	if _, err := tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ?`, documentID); err != nil {
-		return err
-	}
-	for _, page := range pages {
-		if page.Key == "" {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO document_pages (
-			document_id, page_index, object_key, content_type, size
-		) VALUES (?, ?, ?, ?, ?)`,
-			documentID,
-			page.Index,
-			page.Key,
-			page.ContentType,
-			page.Size,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func rollback(tx *sql.Tx) {

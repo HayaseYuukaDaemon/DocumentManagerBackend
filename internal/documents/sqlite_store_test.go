@@ -30,7 +30,7 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 			Total: 2,
 		},
 		Pages: []Page{
-			{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123},
+			{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123, Hash: "page-hash-1"},
 		},
 	})
 	if err != nil {
@@ -59,43 +59,14 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 	if len(got.Pages) != 1 || got.Pages[0].Size != 123 {
 		t.Fatalf("unexpected pages after reopen: %#v", got.Pages)
 	}
-}
-
-func TestSQLiteStoreUpdatePersistsPages(t *testing.T) {
-	ctx := context.Background()
-	store := newTestSQLiteStore(t)
-	defer store.Close()
-
-	doc, err := store.Create(ctx, Document{
-		Source:           testSource,
-		SourceDocumentID: "sqlite-pages",
-		ArchiveStatus:    StatusDownloading,
-	})
-	if err != nil {
-		t.Fatalf("Create returned error: %v", err)
+	if got.Pages[0].Hash != "page-hash-1" {
+		t.Fatalf("unexpected page hash after reopen: %q", got.Pages[0].Hash)
 	}
-
-	_, err = store.Update(ctx, doc.ID, func(d *Document) error {
-		d.Pages = []Page{
-			{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123},
-			{Index: 1, Key: "documents/1/pages/000002.webp", ContentType: "image/webp", Size: 456},
-		}
-		d.Progress.Done = 2
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Update returned error: %v", err)
+	if got.Progress.Done != 1 {
+		t.Fatalf("unexpected progress done after reopen: %d", got.Progress.Done)
 	}
-
-	got, err := store.Get(ctx, doc.ID)
-	if err != nil {
-		t.Fatalf("Get returned error: %v", err)
-	}
-	if got.Progress.Done != 2 {
-		t.Fatalf("unexpected progress done: %d", got.Progress.Done)
-	}
-	if len(got.Pages) != 2 || got.Pages[1].Size != 456 {
-		t.Fatalf("unexpected pages: %#v", got.Pages)
+	if got.Progress.Total != 2 {
+		t.Fatalf("unexpected progress total after reopen: %d", got.Progress.Total)
 	}
 }
 
