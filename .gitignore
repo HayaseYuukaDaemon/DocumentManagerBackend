@@ -16,3 +16,6 @@
 .vscode/
 .idea/
 .DS_Store
+
+# Docs
+s3-docs/

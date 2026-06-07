@@ -13,6 +13,8 @@ import (
 	"document-archive/internal/storage"
 )
 
+const pagePresignTTL = 24 * time.Hour
+
 type App struct {
 	documents      documents.Store
 	storages       map[storage.StorageName]storage.ObjectStore
@@ -89,17 +91,21 @@ func (a *App) GetDocument(ctx context.Context, id int) (documents.Document, erro
 }
 
 func (a *App) GetPage(ctx context.Context, document documents.Document, pageIndex int) (PageResult, error) {
-	storage, err := a.getStorage(document.StorageBackend)
+	storageBackend, err := a.getStorage(document.StorageBackend)
 	if err != nil {
 		return PageResult{}, err
 	}
 	pagesLen := len(document.Pages)
-	if pageIndex >= pagesLen {
+	if pageIndex < 0 || pageIndex >= pagesLen {
 		return PageResult{}, fmt.Errorf("page index out of bounds")
 	}
 	page := document.Pages[pageIndex]
-	if storage.StorageName() == "memory" {
-		pageObject, err := storage.GetObject(ctx, page.Key)
+	if page.Key == "" {
+		return PageResult{}, fmt.Errorf("page not archived")
+	}
+	switch storageBackend.StorageName() {
+	case storage.MemoryStorageName:
+		pageObject, err := storageBackend.GetObject(ctx, page.Key)
 		if err != nil {
 			return PageResult{}, fmt.Errorf("failed to get page object: %w", err)
 		}
@@ -107,8 +113,17 @@ func (a *App) GetPage(ctx context.Context, document documents.Document, pageInde
 			Kind:   PageResultObject,
 			Object: pageObject,
 		}, nil
+	case storage.S3StorageName:
+		redirectURL, err := storageBackend.PresignGetObject(ctx, page.Key, pagePresignTTL)
+		if err != nil {
+			return PageResult{}, fmt.Errorf("failed to presign page object: %w", err)
+		}
+		return PageResult{
+			Kind:        PageResultRedirect,
+			RedirectURL: redirectURL,
+		}, nil
 	}
-	return PageResult{}, fmt.Errorf("unsupported storage backend")
+	return PageResult{}, fmt.Errorf("unsupported storage backend: %s", storageBackend.StorageName())
 }
 
 func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
@@ -181,6 +196,12 @@ func (a *App) processQueued(ctx context.Context) {
 		a.logger.Info("processing document archive", "document_id", document.ID, "source", document.Source)
 		if _, err := a.processDocument(ctx, document.ID); err != nil {
 			a.logger.Warn("process document archive failed", "document_id", document.ID, "error", err)
+			a.documents.UpdateMeta(ctx, document.ID, func(d *documents.DocumentMeta) error {
+				d.ArchiveStatus = documents.StatusFailed
+				d.Error = err.Error()
+				return nil
+			})
+			continue
 		}
 		a.logger.Info("document process done", "document_id", document.ID)
 	}

@@ -66,7 +66,12 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 		}
 
 		size := int64(buf.Len())
-		_, err = objects.PutObject(ctx, key, &buf, int64(buf.Len()), page.ContentType)
+		objectInfo, err := objects.PutObject(ctx, storage.ObjectInfo{
+			Key:         key,
+			Size:        size,
+			ContentType: page.ContentType,
+			ETag:        page.Hash,
+		}, bytes.NewReader(buf.Bytes()))
 		if err != nil {
 			return archivedPages, fmt.Errorf("failed to put object: %w", err)
 		}
@@ -75,7 +80,7 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 			Key:         key,
 			ContentType: page.ContentType,
 			Size:        size,
-			Hash:        page.Hash,
+			Hash:        objectInfo.ETag,
 		}
 		if h.pageDownloadHook != nil {
 			if err := h.pageDownloadHook(ctx, document.ID, docPage); err != nil {
@@ -97,7 +102,11 @@ func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Docume
 	if err != nil {
 		return archive.Manifest{}, fmt.Errorf("failed to marshal document: %w", err)
 	}
-	_, err = objects.PutObject(ctx, key, bytes.NewReader(docJSON), int64(len(docJSON)), "json")
+	_, err = objects.PutObject(ctx, storage.ObjectInfo{
+		Key:         key,
+		Size:        int64(len(docJSON)),
+		ContentType: "json",
+	}, bytes.NewReader(docJSON))
 	if err != nil {
 		return archive.Manifest{}, fmt.Errorf("failed to put object: %w", err)
 	}

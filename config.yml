@@ -1,0 +1,14 @@
+addr: ":8080"
+auth_token: ""
+log_level: "info"
+default_storage: "s3"
+document_store: "sqlite"
+sqlite_path: "document-archive.db"
+s3:
+  endpoint: "http://localhost:9000"
+  bucket: "documents"
+  region: "us-east-1"
+  access_key_id: "minioadmin"
+  secret_access_key: "minioadmin123"
+  session_token: ""
+  use_path_style: true

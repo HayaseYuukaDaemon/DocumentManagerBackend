@@ -38,35 +38,42 @@ func (s *MemoryStore) StorageName() StorageName {
 	return s.storageName
 }
 
-func (s *MemoryStore) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (ObjectInfo, error) {
+func (s *MemoryStore) PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err
 	}
-	if key == "" {
+	if info.Key == "" {
 		return ObjectInfo{}, errors.New("object key is required")
+	}
+	if body == nil {
+		return ObjectInfo{}, errors.New("object body is required")
 	}
 
 	content, err := io.ReadAll(body)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	if size >= 0 && int64(len(content)) != size {
-		return ObjectInfo{}, fmt.Errorf("object size mismatch: expected %d, got %d", size, len(content))
+	if info.Size >= 0 && int64(len(content)) != info.Size {
+		return ObjectInfo{}, fmt.Errorf("object size mismatch: expected %d, got %d", info.Size, len(content))
 	}
 
-	sum := md5.Sum(content)
+	etag := info.ETag
+	if etag == "" {
+		sum := md5.Sum(content)
+		etag = hex.EncodeToString(sum[:])
+	}
 	object := memoryObject{
 		content:     append([]byte(nil), content...),
-		contentType: contentType,
-		etag:        hex.EncodeToString(sum[:]),
+		contentType: info.ContentType,
+		etag:        etag,
 		updatedAt:   time.Now().UTC(),
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.objects[key] = object
+	s.objects[info.Key] = object
 	return ObjectInfo{
-		Key:         key,
+		Key:         info.Key,
 		Size:        int64(len(object.content)),
 		ContentType: object.contentType,
 		ETag:        object.etag,

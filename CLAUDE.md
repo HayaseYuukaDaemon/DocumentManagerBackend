@@ -8,6 +8,7 @@
 - 启动服务并启用可选 Bearer Token：`ARCHIVE_TOKEN=dev-secret go run ./cmd/server`
 - 开发时使用内存后端：`ARCHIVE_DOCUMENT_STORE=memory ARCHIVE_DEFAULT_STORAGE=memory go run ./cmd/server`
 - 使用指定 SQLite 数据库路径：`ARCHIVE_DOCUMENT_STORE=sqlite ARCHIVE_SQLITE_PATH=/path/to/documents.db go run ./cmd/server`
+- 使用 S3-compatible 对象存储：`ARCHIVE_DEFAULT_STORAGE=s3 ARCHIVE_S3_BUCKET=<bucket> ARCHIVE_S3_REGION=<region> ARCHIVE_S3_ACCESS_KEY_ID=<key> ARCHIVE_S3_SECRET_ACCESS_KEY=<secret> go run ./cmd/server`
 - 构建服务：`go build -o bin/document-archive ./cmd/server`
 - 运行全部测试：`go test ./...`
 - 运行单个包的测试：`go test ./internal/documents`
@@ -25,11 +26,11 @@
 这是 ComicManager 的 Go HTTP 归档/采集服务。它负责按来源执行下载与归档流程，并维护文档元数据；页面和 manifest 等二进制对象通过对象存储接口抽象出去。
 
 - [cmd/server/main.go](cmd/server/main.go) 负责服务装配：读取环境配置、创建文档存储、注册 Hitomi 来源处理器和内存对象存储、启动归档 worker，然后启动 HTTP 服务。
-- [internal/config/](internal/config/) 读取环境配置。默认值包括 `ARCHIVE_ADDR=:8080`、`ARCHIVE_DOCUMENT_STORE=sqlite`、`ARCHIVE_SQLITE_PATH=document-archive.db`、`ARCHIVE_DEFAULT_STORAGE=memory`。设置 `ARCHIVE_TOKEN` 后会启用 Bearer Token 鉴权。
+- [internal/config/](internal/config/) 读取配置。优先级为默认值 < `config.yml` < 环境变量。默认值包括 `ARCHIVE_ADDR=:8080`、`ARCHIVE_DOCUMENT_STORE=sqlite`、`ARCHIVE_SQLITE_PATH=document-archive.db`、`ARCHIVE_DEFAULT_STORAGE=memory`。设置 `auth_token` 或 `ARCHIVE_TOKEN` 后会启用 Bearer Token 鉴权。
 - [internal/httpapi/](internal/httpapi/) 是 HTTP 层。它使用 Go 的 `http.ServeMux` 路由模式，并把业务操作委托给 `archive.App`。所有 `/v1/...` 路由在配置 token 后都会经过鉴权；`/healthz` 是公开接口。
 - [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源处理器和对象存储。`RunWorker` 每秒轮询 queued 文档，解析元数据、下载内容、通过页面下载 hook 写入页面更新，并推进文档状态。
 - [internal/documents/](internal/documents/) 定义公开文档模型和 store 接口。当前有两个实现：[internal/documents/store.go](internal/documents/store.go) 中的内存存储，以及 [internal/documents/sqlite_store.go](internal/documents/sqlite_store.go) 中的 SQLite 存储。SQLite 存储把文档和页面放在两张表中，使用软删除，并对未删除的 `(source, source_document_id)` 组合保持唯一约束。
-- [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。当前实现是 `MemoryStore`，对象保存在进程内存中，并支持页面接口直接读取对象内容。
+- [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。当前实现包括 `MemoryStore` 和 S3-compatible `S3Store`。memory 对象保存在进程内存中，S3 对象通过 AWS SDK v2 访问，可配置 endpoint、bucket、region、credentials 和 path-style 行为。
 - [internal/sources/](internal/sources/) 包含来源抽象。[internal/sources/hitomi/](internal/sources/hitomi/) 是当前的 Hitomi handler/resolver：获取图库元数据、解析页面下载 URL、下载页面、写入对象，并向 archive app 发出页面更新。
 
 ## 请求流程
@@ -44,11 +45,12 @@
 
 - 已实现的路由包括：请求归档文档、按来源文档 ID 查询、获取文档、软删除、刷新、获取页面。
 - `GET /v1/documents/{document_id}/manifest` 当前返回 `501 Not Implemented`。
-- `GET /v1/documents/{document_id}/pages/{page_index}` 当前只支持 memory storage backend 的直接对象返回；其他存储后端尚未实现。
+- `GET /v1/documents/{document_id}/pages/{page_index}` 对 memory storage backend 直接返回对象内容；对 S3 等非 memory backend 返回预签名 GET URL 的 302 redirect。
 
 ## 数据与存储注意事项
 
 - 不同文档存储的 ID 语义不同：内存存储使用从 0 开始的 slice 下标，SQLite 使用自增 ID。
 - 两种文档存储中的 `Remove` 都是软删除；已删除文档不会出现在常规读取和查询结果中。
-- 当前服务只注册了 memory object store，即使文档元数据持久化在 SQLite 中，页面对象也仍然只在内存对象存储中。
+- 当前服务总会注册 memory object store；当配置 `ARCHIVE_S3_BUCKET` 或 `ARCHIVE_DEFAULT_STORAGE=s3` 时也会注册 S3-compatible object store。
+- `storage.ObjectInfo.ETag` 是对象抽象层暴露给 HTTP/browser 的 ETag。`PutObject` 输入携带 ETag 时 storage 原样保存并返回；未携带时优先使用具体后端提供的 ETag（例如 S3 原生 ETag），后端未提供时再由 storage 基于对象内容计算。S3 后端把自定义输入 ETag 写入 user metadata `archive-etag`，以便后续 `HEAD/GET` 能读回同一个值。
 - SQLite 初始化会设置 WAL 模式、busy timeout、单连接和 foreign keys。文档/页面更新应保持事务化，避免页面 hook 与状态流转之间发生陈旧写入。

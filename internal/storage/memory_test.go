@@ -13,9 +13,17 @@ func TestMemoryStorePutHeadAndPresign(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
 
-	_, err := store.PutObject(ctx, "documents/test/pages/000001.webp", strings.NewReader("page"), 4, "image/webp")
+	putInfo, err := store.PutObject(ctx, ObjectInfo{
+		Key:         "documents/test/pages/000001.webp",
+		Size:        4,
+		ContentType: "image/webp",
+		ETag:        "source-etag",
+	}, strings.NewReader("page"))
 	if err != nil {
 		t.Fatalf("PutObject returned error: %v", err)
+	}
+	if putInfo.ETag != "source-etag" {
+		t.Fatalf("unexpected put etag: %s", putInfo.ETag)
 	}
 
 	info, err := store.HeadObject(ctx, "documents/test/pages/000001.webp")
@@ -31,8 +39,8 @@ func TestMemoryStorePutHeadAndPresign(t *testing.T) {
 	if info.ContentType != "image/webp" {
 		t.Fatalf("unexpected content type: %s", info.ContentType)
 	}
-	if info.ETag == "" {
-		t.Fatal("expected non-empty etag")
+	if info.ETag != "source-etag" {
+		t.Fatalf("unexpected etag: %s", info.ETag)
 	}
 
 	object, err := store.GetObject(ctx, "documents/test/pages/000001.webp")
@@ -54,6 +62,22 @@ func TestMemoryStorePutHeadAndPresign(t *testing.T) {
 	}
 	if url != "memory://documents/test/pages/000001.webp" {
 		t.Fatalf("unexpected presigned url: %s", url)
+	}
+}
+
+func TestMemoryStorePutCalculatesETag(t *testing.T) {
+	store := NewMemoryStore()
+
+	info, err := store.PutObject(context.Background(), ObjectInfo{
+		Key:         "documents/test/pages/000002.webp",
+		Size:        4,
+		ContentType: "image/webp",
+	}, strings.NewReader("page"))
+	if err != nil {
+		t.Fatalf("PutObject returned error: %v", err)
+	}
+	if info.ETag == "" {
+		t.Fatalf("expected storage-calculated etag")
 	}
 }
 

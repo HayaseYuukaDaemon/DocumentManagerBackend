@@ -18,7 +18,10 @@ type ObjectInfo struct {
 
 type StorageName string
 
-const MemoryStorageName StorageName = "memory"
+const (
+	MemoryStorageName StorageName = "memory"
+	S3StorageName     StorageName = "s3"
+)
 
 type Object struct {
 	ObjectInfo
@@ -27,7 +30,7 @@ type Object struct {
 
 type ObjectStore interface {
 	StorageName() StorageName
-	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (ObjectInfo, error)
+	PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error)
 	GetObject(ctx context.Context, key string) (Object, error)
 	HeadObject(ctx context.Context, key string) (ObjectInfo, error)
 	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)
