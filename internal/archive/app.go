@@ -196,11 +196,6 @@ func (a *App) processQueued(ctx context.Context) {
 		a.logger.Info("processing document archive", "document_id", document.ID, "source", document.Source)
 		if _, err := a.processDocument(ctx, document.ID); err != nil {
 			a.logger.Warn("process document archive failed", "document_id", document.ID, "error", err)
-			a.documents.UpdateMeta(ctx, document.ID, func(d *documents.DocumentMeta) error {
-				d.ArchiveStatus = documents.StatusFailed
-				d.Error = err.Error()
-				return nil
-			})
 			continue
 		}
 		a.logger.Info("document process done", "document_id", document.ID)
@@ -262,7 +257,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		return nil
 	})
 	if err != nil {
-		return documents.Document{}, err
+		return a.failDocument(ctx, document.ID, err)
 	}
 	return document, nil
 }
