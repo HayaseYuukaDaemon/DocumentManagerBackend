@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,8 +13,6 @@ import (
 	"document-archive/internal/sources"
 	"document-archive/internal/storage"
 )
-
-var ErrNotImplemented = errors.New("hitomi archiver not implemented")
 
 const SourceTypeHitomi sources.SourceType = "hitomi"
 

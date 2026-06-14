@@ -1,11 +1,16 @@
 package utils
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type IndexedError struct {
 	Err   error
 	Index int
 }
+
+var ErrNotImplemented = errors.New("This feature is not implemented")
 
 func NewIndexedError(err error, index int) IndexedError {
 	return IndexedError{
