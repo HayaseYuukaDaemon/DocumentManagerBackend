@@ -2,7 +2,6 @@ package documents
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"document-archive/internal/sources"
@@ -111,14 +110,6 @@ type DocumentMeta struct {
 
 func (d *DocumentMeta) Status() DocumentStatus {
 	return d.status
-}
-
-func (d *DocumentMeta) TransitionTo(newStatus DocumentStatus) error {
-	if !canTransitionDocumentStatus(d.status, newStatus) {
-		return fmt.Errorf("invalid document status transition: %s -> %s", d.status, newStatus)
-	}
-	d.status = newStatus
-	return nil
 }
 
 type RequestDocumentInput struct {

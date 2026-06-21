@@ -125,7 +125,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	}
 	defer rollback(tx)
 
-	existing, err := getActiveBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID)
+	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, true)
 	switch {
 	case err == nil:
 		return existing, ErrAlreadyExists
@@ -177,7 +177,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 		}
 	}
 
-	document, err = getTx(ctx, tx, document.ID)
+	document, err = getTx(ctx, tx, document.ID, false)
 	if err != nil {
 		return Document{}, err
 	}
@@ -199,7 +199,7 @@ func (s *SQLiteStore) Get(ctx context.Context, id int) (Document, error) {
 	}
 	defer rollback(tx)
 
-	document, err := getActiveTx(ctx, tx, id)
+	document, err := getTx(ctx, tx, id, true)
 	if err != nil {
 		return Document{}, err
 	}
@@ -220,7 +220,7 @@ func (s *SQLiteStore) GetBySourceDocumentID(ctx context.Context, source sources.
 	}
 	defer rollback(tx)
 
-	document, err := getActiveBySourceDocumentIDTx(ctx, tx, source, sourceDocumentID)
+	document, err := getBySourceDocumentIDTx(ctx, tx, source, sourceDocumentID, true)
 	if err != nil {
 		return Document{}, err
 	}
@@ -241,7 +241,7 @@ func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
 	}
 	defer rollback(tx)
 
-	document, err := getActiveTx(ctx, tx, id)
+	document, err := getTx(ctx, tx, id, true)
 	if err != nil {
 		return Document{}, err
 	}
@@ -335,7 +335,7 @@ func fillDocumentMeta(document *Document, meta DocumentMeta) {
 }
 
 func (s *SQLiteStore) updateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error, tx *sql.Tx) (Document, error) {
-	document, err := getActiveTx(ctx, tx, id)
+	document, err := getTx(ctx, tx, id, true)
 	if err != nil {
 		return Document{}, err
 	}
@@ -475,38 +475,25 @@ func (s *SQLiteStore) RemovePage(ctx context.Context, id int, pageIndex int) err
 	return nil
 }
 
-func getTx(ctx context.Context, tx *sql.Tx, id int) (Document, error) {
+func getTx(ctx context.Context, tx *sql.Tx, id int, visibleOnly bool) (Document, error) {
 	query := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,
 		progress_done, progress_total, error, created_at, updated_at
 		FROM documents WHERE id = ?`
+	if visibleOnly {
+		query += " AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')"
+	}
 	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, id))
 }
 
-func getActiveTx(ctx context.Context, tx *sql.Tx, id int) (Document, error) {
-	query := `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, document_status,
-		progress_done, progress_total, error, created_at, updated_at
-		FROM documents
-		WHERE id = ? AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`
-	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, id))
-}
-
-func getBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string) (Document, error) {
+func getBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string, visibleOnly bool) (Document, error) {
 	query := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,
 		progress_done, progress_total, error, created_at, updated_at
 		FROM documents WHERE source = ? AND source_document_id = ?`
-	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, string(source), sourceDocumentID))
-}
-
-func getActiveBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string) (Document, error) {
-	query := `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, document_status,
-		progress_done, progress_total, error, created_at, updated_at
-		FROM documents
-		WHERE source = ? AND source_document_id = ?
-		AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`
+	if visibleOnly {
+		query += " AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')"
+	}
 	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, string(source), sourceDocumentID))
 }
 
@@ -536,7 +523,7 @@ func (s *SQLiteStore) TransitionTo(ctx context.Context, id int, newStatus Docume
 	}
 	defer rollback(tx)
 
-	document, err := getTx(ctx, tx, id)
+	document, err := getTx(ctx, tx, id, false)
 	if err != nil {
 		return err
 	}
