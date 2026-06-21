@@ -112,6 +112,7 @@ func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Docume
 		SourceMeta:       comic.RawJSON,
 		SourceDocumentID: string(comic.Comic.ID),
 		Title:            comic.Comic.Title,
+		Pages:            make([]documents.Page, len(comic.Pages)),
 	}, nil
 }
 

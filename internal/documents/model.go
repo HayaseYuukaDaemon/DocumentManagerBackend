@@ -95,6 +95,18 @@ type Document struct {
 	status DocumentStatus
 }
 
+func (d Document) MarshalJSON() ([]byte, error) {
+	type documentJSON Document
+
+	return json.Marshal(struct {
+		documentJSON
+		DocumentStatus DocumentStatus `json:"status"`
+	}{
+		documentJSON:   documentJSON(d),
+		DocumentStatus: d.status,
+	})
+}
+
 func (d Document) Status() DocumentStatus {
 	return d.status
 }

@@ -153,7 +153,9 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 		}
 		err = a.documents.TransitionTo(ctx, id, documents.StatusQueued)
 	case documents.All:
-		a.documents.TransitionTo(ctx, id, documents.StatusQueued)
+		if err := a.documents.TransitionTo(ctx, id, documents.StatusQueued); err != nil {
+			return documents.Document{}, err
+		}
 		document, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
 			document.Progress.Done = 0
 			return nil
@@ -224,9 +226,14 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	}
 
 	if document.Progress.Done == 0 {
-		a.documents.TransitionTo(ctx, id, documents.StatusDownloading)
+		if err := a.documents.TransitionTo(ctx, id, documents.StatusDownloading); err != nil {
+			return a.failDocument(ctx, id, err)
+		}
 		document, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
 			d.SourceMeta = manifest.SourceMeta
+			if len(manifest.Pages) > 0 {
+				d.Progress.Total = len(manifest.Pages)
+			}
 			return nil
 		})
 		if err != nil {
@@ -246,12 +253,17 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		if manifest.Title != "" {
 			d.Title = manifest.Title
 		}
+		if len(manifest.Pages) > 0 {
+			d.Progress.Total = len(manifest.Pages)
+		}
 		d.Error = ""
 		return nil
 	})
-	a.documents.TransitionTo(ctx, id, documents.StatusArchived)
 	if err != nil {
 		return a.failDocument(ctx, document.ID, err)
+	}
+	if err := a.documents.TransitionTo(ctx, id, documents.StatusArchived); err != nil {
+		return a.failDocument(ctx, id, err)
 	}
 	return document, nil
 }
@@ -277,8 +289,10 @@ func (a *App) failDocument(ctx context.Context, id int, cause error) (documents.
 		d.Error = cause.Error()
 		return nil
 	})
-	a.documents.TransitionTo(ctx, id, documents.StatusFailed)
 	if err != nil {
+		return document, err
+	}
+	if err := a.documents.TransitionTo(ctx, id, documents.StatusFailed); err != nil {
 		return document, err
 	}
 	a.logger.Warn("document archive failed", "document_id", document.ID, "error", cause)
