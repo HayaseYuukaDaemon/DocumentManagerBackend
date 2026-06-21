@@ -70,11 +70,10 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			source_meta TEXT,
 			title TEXT NOT NULL DEFAULT '',
 			storage_backend TEXT NOT NULL DEFAULT '',
-			archive_status TEXT NOT NULL,
+			document_status TEXT NOT NULL CHECK (document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed', 'deleted', 'purged')),
 			progress_done INTEGER NOT NULL DEFAULT 0,
 			progress_total INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
-			removed INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -96,12 +95,12 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			return err
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, removed, id)`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(document_status, id)`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_active_source_identity
 		ON documents(source, source_document_id)
-		WHERE removed = 0`); err != nil {
+		WHERE document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_index)`); err != nil {
@@ -126,7 +125,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	}
 	defer rollback(tx)
 
-	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, false)
+	existing, err := getActiveBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID)
 	switch {
 	case err == nil:
 		return existing, ErrAlreadyExists
@@ -137,26 +136,25 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	now := time.Now().UTC()
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	document.Removed = false
+	document.status = StatusQueued
 
 	pages := document.Pages
 	document.Pages = nil
 	document.Progress.Done = 0
 
 	result, err := tx.ExecContext(ctx, `INSERT INTO documents (
-		source, source_document_id, source_meta, title, storage_backend, archive_status,
-		progress_done, progress_total, error, removed, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(document.Source),
 		document.SourceDocumentID,
 		rawJSONToNullString(document.SourceMeta),
 		document.Title,
 		string(document.StorageBackend),
-		string(document.ArchiveStatus),
+		string(document.status),
 		document.Progress.Done,
 		document.Progress.Total,
 		document.Error,
-		boolToInt(document.Removed),
 		formatTime(document.CreatedAt),
 		formatTime(document.UpdatedAt),
 	)
@@ -179,7 +177,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 		}
 	}
 
-	document, err = getTx(ctx, tx, document.ID, true)
+	document, err = getTx(ctx, tx, document.ID)
 	if err != nil {
 		return Document{}, err
 	}
@@ -201,7 +199,7 @@ func (s *SQLiteStore) Get(ctx context.Context, id int) (Document, error) {
 	}
 	defer rollback(tx)
 
-	document, err := getTx(ctx, tx, id, false)
+	document, err := getActiveTx(ctx, tx, id)
 	if err != nil {
 		return Document{}, err
 	}
@@ -222,7 +220,7 @@ func (s *SQLiteStore) GetBySourceDocumentID(ctx context.Context, source sources.
 	}
 	defer rollback(tx)
 
-	document, err := getBySourceDocumentIDTx(ctx, tx, source, sourceDocumentID, false)
+	document, err := getActiveBySourceDocumentIDTx(ctx, tx, source, sourceDocumentID)
 	if err != nil {
 		return Document{}, err
 	}
@@ -243,11 +241,14 @@ func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
 	}
 	defer rollback(tx)
 
-	document, err := getTx(ctx, tx, id, false)
+	document, err := getActiveTx(ctx, tx, id)
 	if err != nil {
 		return Document{}, err
 	}
-	document.Removed = true
+	if !canTransitionDocumentStatus(document.status, StatusDeleted) {
+		return Document{}, fmt.Errorf("invalid document status transition: %s -> %s", document.status, StatusDeleted)
+	}
+	document.status = StatusDeleted
 	document.UpdatedAt = time.Now().UTC()
 	if err := updateDocumentTx(ctx, tx, document); err != nil {
 		return Document{}, err
@@ -258,7 +259,7 @@ func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
 	return document, nil
 }
 
-func (s *SQLiteStore) ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error) {
+func (s *SQLiteStore) ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -273,10 +274,10 @@ func (s *SQLiteStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 	defer rollback(tx)
 
 	rows, err := tx.QueryContext(ctx, `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, archive_status,
-		progress_done, progress_total, error, removed, created_at, updated_at
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
 		FROM documents
-		WHERE archive_status = ? AND removed = 0
+		WHERE document_status = ?
 		ORDER BY id
 		LIMIT ?`, string(status), limit)
 	if err != nil {
@@ -318,10 +319,9 @@ func extractDocumentMeta(document Document) DocumentMeta {
 		SourceMeta:     document.SourceMeta,
 		Title:          document.Title,
 		StorageBackend: document.StorageBackend,
-		ArchiveStatus:  document.ArchiveStatus,
+		status:         document.status,
 		Progress:       document.Progress,
 		Error:          document.Error,
-		Removed:        document.Removed,
 	}
 }
 
@@ -329,14 +329,13 @@ func fillDocumentMeta(document *Document, meta DocumentMeta) {
 	document.SourceMeta = meta.SourceMeta
 	document.Title = meta.Title
 	document.StorageBackend = meta.StorageBackend
-	document.ArchiveStatus = meta.ArchiveStatus
+	document.status = meta.status
 	document.Progress = meta.Progress
 	document.Error = meta.Error
-	document.Removed = meta.Removed
 }
 
 func (s *SQLiteStore) updateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error, tx *sql.Tx) (Document, error) {
-	document, err := getTx(ctx, tx, id, true)
+	document, err := getActiveTx(ctx, tx, id)
 	if err != nil {
 		return Document{}, err
 	}
@@ -476,36 +475,43 @@ func (s *SQLiteStore) RemovePage(ctx context.Context, id int, pageIndex int) err
 	return nil
 }
 
-func getTx(ctx context.Context, tx *sql.Tx, id int, includeRemoved bool) (Document, error) {
+func getTx(ctx context.Context, tx *sql.Tx, id int) (Document, error) {
 	query := `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, archive_status,
-		progress_done, progress_total, error, removed, created_at, updated_at
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
 		FROM documents WHERE id = ?`
-	if !includeRemoved {
-		query += ` AND removed = 0`
-	}
-
-	document, err := scanDocument(tx.QueryRowContext(ctx, query, id))
-	if err != nil {
-		return Document{}, err
-	}
-	document.Pages, err = listPagesTx(ctx, tx, document.ID)
-	if err != nil {
-		return Document{}, err
-	}
-	return document, nil
+	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, id))
 }
 
-func getBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string, includeRemoved bool) (Document, error) {
+func getActiveTx(ctx context.Context, tx *sql.Tx, id int) (Document, error) {
 	query := `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, archive_status,
-		progress_done, progress_total, error, removed, created_at, updated_at
-		FROM documents WHERE source = ? AND source_document_id = ?`
-	if !includeRemoved {
-		query += ` AND removed = 0`
-	}
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
+		FROM documents
+		WHERE id = ? AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`
+	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, id))
+}
 
-	document, err := scanDocument(tx.QueryRowContext(ctx, query, string(source), sourceDocumentID))
+func getBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string) (Document, error) {
+	query := `SELECT
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
+		FROM documents WHERE source = ? AND source_document_id = ?`
+	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, string(source), sourceDocumentID))
+}
+
+func getActiveBySourceDocumentIDTx(ctx context.Context, tx *sql.Tx, source sources.SourceType, sourceDocumentID string) (Document, error) {
+	query := `SELECT
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
+		FROM documents
+		WHERE source = ? AND source_document_id = ?
+		AND document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`
+	return getByQueryRow(ctx, tx, tx.QueryRowContext(ctx, query, string(source), sourceDocumentID))
+}
+
+func getByQueryRow(ctx context.Context, tx *sql.Tx, row documentScanner) (Document, error) {
+	document, err := scanDocument(row)
 	if err != nil {
 		return Document{}, err
 	}
@@ -520,6 +526,33 @@ type documentScanner interface {
 	Scan(dest ...any) error
 }
 
+func (s *SQLiteStore) TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	document, err := getTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if !canTransitionDocumentStatus(document.status, newStatus) {
+		return fmt.Errorf("invalid document status transition: %s -> %s", document.status, newStatus)
+	}
+
+	document.status = newStatus
+	document.UpdatedAt = time.Now().UTC()
+	if err := updateDocumentTx(ctx, tx, document); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 // scanDocument 将扁平的 documents 表映射到公共的 Document 模型。
 // 页面行由调用者单独加载，因为它们存放在 document_pages 表中。
 func scanDocument(scanner documentScanner) (Document, error) {
@@ -527,8 +560,7 @@ func scanDocument(scanner documentScanner) (Document, error) {
 	var source string
 	var sourceMeta sql.NullString
 	var storageBackend string
-	var archiveStatus string
-	var removed int
+	var documentStatus string
 	var createdAt string
 	var updatedAt string
 
@@ -539,11 +571,10 @@ func scanDocument(scanner documentScanner) (Document, error) {
 		&sourceMeta,
 		&document.Title,
 		&storageBackend,
-		&archiveStatus,
+		&documentStatus,
 		&document.Progress.Done,
 		&document.Progress.Total,
 		&document.Error,
-		&removed,
 		&createdAt,
 		&updatedAt,
 	)
@@ -559,8 +590,7 @@ func scanDocument(scanner documentScanner) (Document, error) {
 		document.SourceMeta = []byte(sourceMeta.String)
 	}
 	document.StorageBackend = storage.StorageName(storageBackend)
-	document.ArchiveStatus = ArchiveStatus(archiveStatus)
-	document.Removed = removed != 0
+	document.status = DocumentStatus(documentStatus)
 
 	document.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
@@ -580,11 +610,10 @@ func updateDocumentTx(ctx context.Context, tx *sql.Tx, document Document) error 
 		source_meta = ?,
 		title = ?,
 		storage_backend = ?,
-		archive_status = ?,
+		document_status = ?,
 		progress_done = ?,
 		progress_total = ?,
 		error = ?,
-		removed = ?,
 		created_at = ?,
 		updated_at = ?
 		WHERE id = ?`,
@@ -593,11 +622,10 @@ func updateDocumentTx(ctx context.Context, tx *sql.Tx, document Document) error 
 		rawJSONToNullString(document.SourceMeta),
 		document.Title,
 		string(document.StorageBackend),
-		string(document.ArchiveStatus),
+		string(document.status),
 		document.Progress.Done,
 		document.Progress.Total,
 		document.Error,
-		boolToInt(document.Removed),
 		formatTime(document.CreatedAt),
 		formatTime(document.UpdatedAt),
 		document.ID,
@@ -655,13 +683,6 @@ func rawJSONToNullString(raw []byte) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: string(raw), Valid: true}
-}
-
-func boolToInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 func formatTime(value time.Time) string {

@@ -21,8 +21,9 @@ type Store interface {
 	Get(ctx context.Context, id int) (Document, error)
 	GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error)
 	Remove(ctx context.Context, id int) (Document, error)
-	ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error)
+	ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error)
 	UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error)
+	TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error
 	AddPage(ctx context.Context, id int, page Page) error
 	RemovePage(ctx context.Context, id int, pageIndex int) error
 }
@@ -49,7 +50,7 @@ func (s *MemoryStore) Get(ctx context.Context, id int) (Document, error) {
 		return Document{}, ErrNotFound
 	}
 	d := s.idMap[id]
-	if d.Removed {
+	if !isVisibleDocumentStatus(d.status) {
 		return Document{}, ErrNotFound
 	}
 	return d, nil
@@ -63,7 +64,7 @@ func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, d := range s.idMap {
-		if d.Source == source && d.SourceDocumentID == sourceDocumentID && !d.Removed {
+		if d.Source == source && d.SourceDocumentID == sourceDocumentID && isVisibleDocumentStatus(d.status) {
 			return d, nil
 		}
 	}
@@ -78,7 +79,7 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, d := range s.idMap {
-		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID && !d.Removed {
+		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID && isVisibleDocumentStatus(d.status) {
 			return d, ErrAlreadyExists
 		}
 	}
@@ -100,7 +101,7 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 	document.ID = len(s.idMap)
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	document.Removed = false
+	document.status = StatusQueued
 	s.idMap = append(s.idMap, document)
 
 	for index, page := range pages {
@@ -122,13 +123,19 @@ func (s *MemoryStore) Remove(ctx context.Context, id int) (Document, error) {
 		return Document{}, ErrNotFound
 	}
 	document := s.idMap[id]
-	document.Removed = true
+	if !isVisibleDocumentStatus(document.status) {
+		return Document{}, ErrNotFound
+	}
+	if !canTransitionDocumentStatus(document.status, StatusDeleted) {
+		return Document{}, fmt.Errorf("invalid document status transition: %s -> %s", document.status, StatusDeleted)
+	}
+	document.status = StatusDeleted
 	document.UpdatedAt = time.Now().UTC()
 	s.idMap[id] = document
 	return document, nil
 }
 
-func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, limit int) ([]Document, error) {
+func (s *MemoryStore) ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -141,10 +148,7 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status ArchiveStatus, li
 
 	result := make([]Document, 0, limit)
 	for _, document := range s.idMap {
-		if document.Removed {
-			continue
-		}
-		if document.ArchiveStatus != status {
+		if document.status != status {
 			continue
 		}
 		result = append(result, document)
@@ -170,6 +174,9 @@ func (s *MemoryStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentM
 	}
 
 	document := &s.idMap[id]
+	if !isVisibleDocumentStatus(document.status) {
+		return Document{}, ErrNotFound
+	}
 	documentMeta := extractDocumentMeta(*document)
 
 	if err := fn(&documentMeta); err != nil {
@@ -181,6 +188,25 @@ func (s *MemoryStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentM
 	return *document, nil
 }
 
+func (s *MemoryStore) TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 0 || id >= len(s.idMap) {
+		return ErrNotFound
+	}
+	document := &s.idMap[id]
+	if !canTransitionDocumentStatus(document.status, newStatus) {
+		return fmt.Errorf("invalid document status transition: %s -> %s", document.status, newStatus)
+	}
+	document.status = newStatus
+	document.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
 func (s *MemoryStore) AddPage(ctx context.Context, id int, page Page) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -189,6 +215,9 @@ func (s *MemoryStore) AddPage(ctx context.Context, id int, page Page) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id < 0 || id >= len(s.idMap) {
+		return ErrNotFound
+	}
+	if !isVisibleDocumentStatus(s.idMap[id].status) {
 		return ErrNotFound
 	}
 	return s.addPageLocked(id, page, time.Now().UTC())
@@ -203,6 +232,9 @@ func (s *MemoryStore) RemovePage(ctx context.Context, id int, pageIndex int) err
 	defer s.mu.Unlock()
 	if id < 0 || id >= len(s.idMap) {
 		return ErrPageNotFound
+	}
+	if !isVisibleDocumentStatus(s.idMap[id].status) {
+		return ErrNotFound
 	}
 	return s.removePageLocked(id, pageIndex, time.Now().UTC())
 }

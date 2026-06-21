@@ -1,7 +1,38 @@
 # TODO
 
-## 近期计划
+## 近期目标
+
+### 架构讨论: 要不要把删除状态合入ArchiveStatus?
+- 添加定期扫描状态为`deleted`的文档的功能 
+  - 间隔可配置, 默认1d
+  - 检索代码, 看看是否能确保`deleted`的文档不会出现在任何外部API
+  - 如有可能, 看看能不能直接在数据库层面屏蔽这种
+  - 触发扫描任务后, 从数据库中检索所有`deleted`的文档, 从后端OSS中移除对应的文件和manifest, 将状态标记为`purged`
+  - 程序启动时, 扫描数据库, 如有待删除则执行
+  - 特别注意这个删除的语义, 程序中很容易忘记要处理已删除的情况, 最好是能从数据库层面约束, 再不济也要尽量把问题约束在编译期
+
+### 实现nhentai handler
+
+### 实现jmcomic handler
+
+## 优化目标
+
+- 实现灾难恢复功能
+  - 比如程序启动时, 在当前目录下建立一个`.dmb-running`的stub文件, 正常退出时由程序删除
+  - 如果异常退出, 例如收到`SIGKILL`, 该文件不会被移除, 下次程序启动时将检测到此标记.
+  - 此时程序需要进入不一致性恢复状态, 具体如何恢复, 以后再探讨吧
 
 - 梳理 `Progress.Done` / `Progress.Total` 的所有权。
   - 当前 `Done` 逐步改为由 store 的 `AddPage` / `RemovePage` 维护，但 `UpdateMeta` 仍可修改完整 `Progress`。
   - 后续考虑收窄 meta 更新能力，或者提供更明确的 progress reset/update API。
+
+- 分离`StorageType`和`StorageName`的语义
+  - 当前`StorageName`既有名称也有类型的语义, 同一类型也可能有多个实现, 比如s3后端可以是本地minio, 也可能是cloudflare R2.
+
+- 实现数据库版本管理与迁移
+  - 在公司干活发现公司有个能够自动迁移数据库的功能, 只要写好了`*.up.sql`这种schema, 程序能自动根据schema升级数据库.
+  - 这个需要改表结构, 好像要加个`versions`表
+
+- 把`IndexedError`用起来, 有批量处理时报错的地方都写上
+
+- 再开个表, 表名叫`maintainance_log`, 专门记录定期删除等维护事件

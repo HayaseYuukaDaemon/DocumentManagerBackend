@@ -17,7 +17,6 @@ func TestMemoryStoreCreateRejectsDuplicateSourceDocument(t *testing.T) {
 	first, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "abc",
-		ArchiveStatus:    StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("first Create returned error: %v", err)
@@ -26,7 +25,6 @@ func TestMemoryStoreCreateRejectsDuplicateSourceDocument(t *testing.T) {
 	second, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "abc",
-		ArchiveStatus:    StatusQueued,
 	})
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("second Create should have returned ErrAlreadyExists, got %v", err)
@@ -48,14 +46,13 @@ func TestMemoryStoreCreateRejectsDuplicateSourceDocument(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreRemovedDocumentsAreHidden(t *testing.T) {
+func TestMemoryStoreDeletedDocumentsAreHidden(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
 
 	doc, err := store.Create(ctx, Document{
 		Source:           testSource,
-		SourceDocumentID: "removed",
-		ArchiveStatus:    StatusQueued,
+		SourceDocumentID: "deleted",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -64,17 +61,17 @@ func TestMemoryStoreRemovedDocumentsAreHidden(t *testing.T) {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected removed document to be hidden by Get, got %v", err)
+		t.Fatalf("expected deleted document to be hidden by Get, got %v", err)
 	}
-	if _, err := store.GetBySourceDocumentID(ctx, testSource, "removed"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected removed document to be hidden by source lookup, got %v", err)
+	if _, err := store.GetBySourceDocumentID(ctx, testSource, "deleted"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted document to be hidden by source lookup, got %v", err)
 	}
 	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
 	if err != nil {
 		t.Fatalf("ListByStatus returned error: %v", err)
 	}
 	if len(queued) != 0 {
-		t.Fatalf("expected removed document to be hidden by ListByStatus, got %#v", queued)
+		t.Fatalf("expected deleted document to be hidden by ListByStatus, got %#v", queued)
 	}
 }
 
@@ -85,7 +82,6 @@ func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	first, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "recreate",
-		ArchiveStatus:    StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -97,7 +93,6 @@ func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	second, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "recreate",
-		ArchiveStatus:    StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("second Create returned error: %v", err)
@@ -132,7 +127,6 @@ func TestMemoryStoreUpdateMaintainsSourceIndex(t *testing.T) {
 	doc, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "old",
-		ArchiveStatus:    StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -161,7 +155,6 @@ func TestMemoryStoreCreatePersistsPagesLikeSQLite(t *testing.T) {
 	doc, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "memory-pages",
-		ArchiveStatus:    StatusQueued,
 		Progress: Progress{
 			Done:  99,
 			Total: 2,
@@ -191,7 +184,6 @@ func TestMemoryStoreAddAndRemovePageLikeSQLite(t *testing.T) {
 	doc, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "memory-add-remove-pages",
-		ArchiveStatus:    StatusDownloading,
 		Progress: Progress{
 			Total: 2,
 		},

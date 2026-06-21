@@ -81,7 +81,6 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 		SourceDocumentID: input.SourceDocumentID,
 		SourceMeta:       input.SourceMeta,
 		StorageBackend:   storageBackend,
-		ArchiveStatus:    documents.StatusQueued,
 	}
 	return a.documents.Create(ctx, document)
 }
@@ -152,12 +151,13 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 	switch mode {
 	case documents.OnlyMetaData:
 		_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
-			document.ArchiveStatus = documents.StatusQueued
-			return nil
+			return document.TransitionTo(documents.StatusQueued)
 		})
 	case documents.All:
 		_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
-			document.ArchiveStatus = documents.StatusQueued
+			if err := document.TransitionTo(documents.StatusQueued); err != nil {
+				return err
+			}
 			document.Progress.Done = 0
 			return nil
 		})
@@ -218,8 +218,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	}
 
 	_, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
-		document.ArchiveStatus = documents.StatusResolving
-		return nil
+		return document.TransitionTo(documents.StatusResolving)
 	})
 	if err != nil {
 		return a.failDocument(ctx, id, err)
@@ -231,7 +230,9 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 
 	if document.Progress.Done == 0 {
 		document, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
-			d.ArchiveStatus = documents.StatusDownloading
+			if err := d.TransitionTo(documents.StatusDownloading); err != nil {
+				return err
+			}
 			d.SourceMeta = manifest.SourceMeta
 			return nil
 		})
@@ -252,7 +253,9 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		if manifest.Title != "" {
 			d.Title = manifest.Title
 		}
-		d.ArchiveStatus = documents.StatusArchived
+		if err := d.TransitionTo(documents.StatusArchived); err != nil {
+			return err
+		}
 		d.Error = ""
 		return nil
 	})
@@ -280,7 +283,9 @@ func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStor
 
 func (a *App) failDocument(ctx context.Context, id int, cause error) (documents.Document, error) {
 	document, err := a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
-		d.ArchiveStatus = documents.StatusFailed
+		if err := d.TransitionTo(documents.StatusFailed); err != nil {
+			return err
+		}
 		d.Error = cause.Error()
 		return nil
 	})

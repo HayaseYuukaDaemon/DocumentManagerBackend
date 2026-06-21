@@ -1,21 +1,71 @@
 package documents
 
 import (
+	"encoding/json"
+	"fmt"
+	"time"
+
 	"document-archive/internal/sources"
 	"document-archive/internal/storage"
-	"encoding/json"
-	"time"
 )
 
-type ArchiveStatus string
+type DocumentStatus string
 
 const (
-	StatusQueued      ArchiveStatus = "queued"
-	StatusResolving   ArchiveStatus = "resolving"
-	StatusDownloading ArchiveStatus = "downloading"
-	StatusArchived    ArchiveStatus = "archived"
-	StatusFailed      ArchiveStatus = "failed"
+	StatusQueued      DocumentStatus = "queued"
+	StatusResolving   DocumentStatus = "resolving"
+	StatusDownloading DocumentStatus = "downloading"
+	StatusArchived    DocumentStatus = "archived"
+	StatusFailed      DocumentStatus = "failed"
+	StatusDeleted     DocumentStatus = "deleted"
+	StatusPurged      DocumentStatus = "purged"
 )
+
+func isKnownDocumentStatus(status DocumentStatus) bool {
+	switch status {
+	case StatusQueued, StatusResolving, StatusDownloading, StatusArchived, StatusFailed, StatusDeleted, StatusPurged:
+		return true
+	default:
+		return false
+	}
+}
+
+func isVisibleDocumentStatus(status DocumentStatus) bool {
+	switch status {
+	case StatusQueued, StatusResolving, StatusDownloading, StatusArchived, StatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func canTransitionDocumentStatus(from, to DocumentStatus) bool {
+	if !isKnownDocumentStatus(from) || !isKnownDocumentStatus(to) {
+		return false
+	}
+	if from == to {
+		return true
+	}
+
+	switch from {
+	case StatusQueued:
+		return to == StatusResolving || to == StatusFailed || to == StatusDeleted
+	case StatusResolving:
+		return to == StatusDownloading || to == StatusArchived || to == StatusFailed || to == StatusDeleted
+	case StatusDownloading:
+		return to == StatusArchived || to == StatusFailed || to == StatusDeleted
+	case StatusArchived:
+		return to == StatusQueued || to == StatusDeleted
+	case StatusFailed:
+		return to == StatusQueued || to == StatusDeleted
+	case StatusDeleted:
+		return to == StatusPurged
+	case StatusPurged:
+		return false
+	default:
+		return false
+	}
+}
 
 type Progress struct {
 	Done  int `json:"done"` // 这个应该是由store维护的，外部不应该修改（AddPage时自动加1，RemovePage时自动减1）
@@ -37,23 +87,38 @@ type Document struct {
 	SourceMeta       json.RawMessage     `json:"source_meta,omitempty"`
 	Title            string              `json:"title"`
 	StorageBackend   storage.StorageName `json:"storage_backend"`
-	ArchiveStatus    ArchiveStatus       `json:"archive_status"`
 	Progress         Progress            `json:"progress"`
 	Error            string              `json:"error,omitempty"`
 	Pages            []Page              `json:"pages"`
-	Removed          bool                `json:"removed"`
 	CreatedAt        time.Time           `json:"created_at"`
 	UpdatedAt        time.Time           `json:"updated_at"`
+
+	status DocumentStatus
+}
+
+func (d Document) Status() DocumentStatus {
+	return d.status
 }
 
 type DocumentMeta struct {
 	SourceMeta     json.RawMessage
 	Title          string
 	StorageBackend storage.StorageName
-	ArchiveStatus  ArchiveStatus
+	status         DocumentStatus
 	Progress       Progress
 	Error          string
-	Removed        bool
+}
+
+func (d *DocumentMeta) Status() DocumentStatus {
+	return d.status
+}
+
+func (d *DocumentMeta) TransitionTo(newStatus DocumentStatus) error {
+	if !canTransitionDocumentStatus(d.status, newStatus) {
+		return fmt.Errorf("invalid document status transition: %s -> %s", d.status, newStatus)
+	}
+	d.status = newStatus
+	return nil
 }
 
 type RequestDocumentInput struct {

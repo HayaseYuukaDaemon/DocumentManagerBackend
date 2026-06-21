@@ -24,7 +24,7 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 		SourceMeta:       []byte(`{"ok":true}`),
 		Title:            "SQLite Persist",
 		StorageBackend:   storage.MemoryStorageName,
-		ArchiveStatus:    StatusQueued,
+		status:           StatusQueued,
 		Progress: Progress{
 			Done:  1,
 			Total: 2,
@@ -70,15 +70,15 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreRemovedDocumentsAreHidden(t *testing.T) {
+func TestSQLiteStoreDeletedDocumentsAreHidden(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteStore(t)
 	defer store.Close()
 
 	doc, err := store.Create(ctx, Document{
 		Source:           testSource,
-		SourceDocumentID: "sqlite-removed",
-		ArchiveStatus:    StatusQueued,
+		SourceDocumentID: "sqlite-deleted",
+		status:           StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -88,17 +88,17 @@ func TestSQLiteStoreRemovedDocumentsAreHidden(t *testing.T) {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected removed document to be hidden by Get, got %v", err)
+		t.Fatalf("expected deleted document to be hidden by Get, got %v", err)
 	}
-	if _, err := store.GetBySourceDocumentID(ctx, testSource, "sqlite-removed"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected removed document to be hidden by source lookup, got %v", err)
+	if _, err := store.GetBySourceDocumentID(ctx, testSource, "sqlite-deleted"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted document to be hidden by source lookup, got %v", err)
 	}
 	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
 	if err != nil {
 		t.Fatalf("ListByStatus returned error: %v", err)
 	}
 	if len(queued) != 0 {
-		t.Fatalf("expected removed document to be hidden by ListByStatus, got %#v", queued)
+		t.Fatalf("expected deleted document to be hidden by ListByStatus, got %#v", queued)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	first, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "sqlite-recreate",
-		ArchiveStatus:    StatusQueued,
+		status:           StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -122,7 +122,7 @@ func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	second, err := store.Create(ctx, Document{
 		Source:           testSource,
 		SourceDocumentID: "sqlite-recreate",
-		ArchiveStatus:    StatusQueued,
+		status:           StatusQueued,
 	})
 	if err != nil {
 		t.Fatalf("second Create returned error: %v", err)
@@ -140,4 +140,87 @@ func newTestSQLiteStore(t *testing.T) *SQLiteStore {
 		t.Fatalf("NewSQLiteStore returned error: %v", err)
 	}
 	return store
+}
+
+func TestSQLiteStoreTransitionToValidatesStateGraph(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteStore(t)
+	defer store.Close()
+
+	doc, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "sqlite-transition",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	if err := store.TransitionTo(ctx, doc.ID, StatusResolving); err != nil {
+		t.Fatalf("queued -> resolving should be valid: %v", err)
+	}
+	if err := store.TransitionTo(ctx, doc.ID, StatusArchived); err != nil {
+		t.Fatalf("resolving -> archived should be valid for metadata refresh: %v", err)
+	}
+	archived, err := store.ListByStatus(ctx, StatusArchived, 10)
+	if err != nil {
+		t.Fatalf("ListByStatus returned error: %v", err)
+	}
+	if len(archived) != 1 || archived[0].ID != doc.ID {
+		t.Fatalf("expected archived document after transition, got %#v", archived)
+	}
+}
+
+func TestSQLiteStoreTransitionToRejectsInvalidStateGraph(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteStore(t)
+	defer store.Close()
+
+	doc, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "sqlite-invalid-transition",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	if err := store.TransitionTo(ctx, doc.ID, StatusArchived); err == nil {
+		t.Fatalf("queued -> archived should be rejected")
+	}
+	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
+	if err != nil {
+		t.Fatalf("ListByStatus returned error: %v", err)
+	}
+	if len(queued) != 1 || queued[0].ID != doc.ID {
+		t.Fatalf("expected document to remain queued after invalid transition, got %#v", queued)
+	}
+}
+
+func TestSQLiteStoreTransitionDeletedToPurged(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteStore(t)
+	defer store.Close()
+
+	doc, err := store.Create(ctx, Document{
+		Source:           testSource,
+		SourceDocumentID: "sqlite-purge-transition",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.Remove(ctx, doc.ID); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if err := store.TransitionTo(ctx, doc.ID, StatusPurged); err != nil {
+		t.Fatalf("deleted -> purged should be valid: %v", err)
+	}
+	purged, err := store.ListByStatus(ctx, StatusPurged, 10)
+	if err != nil {
+		t.Fatalf("ListByStatus returned error: %v", err)
+	}
+	if len(purged) != 1 || purged[0].ID != doc.ID {
+		t.Fatalf("expected purged document after transition, got %#v", purged)
+	}
+	if err := store.TransitionTo(ctx, doc.ID, StatusQueued); err == nil {
+		t.Fatalf("purged -> queued should be rejected")
+	}
 }
