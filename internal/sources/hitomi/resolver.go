@@ -92,14 +92,18 @@ type GGInfo struct {
 
 func (r *Resolver) DownloadPage(ctx context.Context, page DownloadPage, w io.Writer) error {
 	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := range 5 {
 		if err := ctx.Err(); err != nil {
-			return err
+			lastErr = err
+			sleepBeforeRetry(ctx, attempt)
+			continue
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, page.URL, nil)
 		if err != nil {
-			return err
+			lastErr = err
+			sleepBeforeRetry(ctx, attempt)
+			continue
 		}
 		req.Header.Set("User-Agent", "document-archive/0.1")
 		if page.Referer != "" {
@@ -123,7 +127,12 @@ func (r *Resolver) DownloadPage(ctx context.Context, page DownloadPage, w io.Wri
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			defer resp.Body.Close()
 			_, err = io.Copy(w, resp.Body)
-			return err
+			if err != nil {
+				lastErr = err
+				sleepBeforeRetry(ctx, attempt)
+				continue
+			}
+			return nil
 		}
 
 		lastErr = fmt.Errorf("GET %s returned %s", page.URL, resp.Status)
