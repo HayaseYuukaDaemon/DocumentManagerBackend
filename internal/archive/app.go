@@ -137,6 +137,16 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 			return nil, err
 		}
 		return []documents.Document{document}, nil
+	case documents.QueryByStatus:
+		var params documents.QueryByStatusParams
+		if err := json.Unmarshal(input.Params, &params); err != nil {
+			return nil, fmt.Errorf("decode query params: %w", err)
+		}
+		documents, err := a.documents.ListByStatus(ctx, params.Status, params.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return documents, nil
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}

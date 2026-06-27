@@ -136,6 +136,7 @@ type QueryMode string
 const (
 	QueryBySourceDocumentID QueryMode = "by_source_document_id"
 	QueryByRequestTime      QueryMode = "by_request_time"
+	QueryByStatus           QueryMode = "by_status"
 )
 
 type RefreshMode string
@@ -148,6 +149,11 @@ const (
 type QueryInput struct {
 	Mode   QueryMode       `json:"mode"`
 	Params json.RawMessage `json:"params,omitempty"`
+}
+
+type QueryByStatusParams struct {
+	Status DocumentStatus `json:"status"`
+	Limit  int            `json:"limit,omitempty"`
 }
 
 type QueryBySourceDocumentIDParams struct {

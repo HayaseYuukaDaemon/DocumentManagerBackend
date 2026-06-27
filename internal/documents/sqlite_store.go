@@ -263,28 +263,33 @@ func (s *SQLiteStore) ListByStatus(ctx context.Context, status DocumentStatus, l
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 10
-	}
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 	defer rollback(tx)
-
-	rows, err := tx.QueryContext(ctx, `SELECT
+	query := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,
 		progress_done, progress_total, error, created_at, updated_at
 		FROM documents
 		WHERE document_status = ?
-		ORDER BY id
-		LIMIT ?`, string(status), limit)
+		ORDER BY id`
+	var rows *sql.Rows
+	if limit <= 0 {
+		rows, err = tx.QueryContext(ctx, query, string(status))
+	} else {
+		rows, err = tx.QueryContext(ctx, query+" LIMIT ?", string(status), limit)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]Document, 0, limit)
+	capacity := 0
+	if limit > 0 {
+		capacity = limit
+	}
+	result := make([]Document, 0, capacity)
 	for rows.Next() {
 		document, err := scanDocument(rows)
 		if err != nil {

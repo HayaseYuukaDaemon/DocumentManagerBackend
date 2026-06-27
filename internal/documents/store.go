@@ -139,20 +139,21 @@ func (s *MemoryStore) ListByStatus(ctx context.Context, status DocumentStatus, l
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 10
-	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	result := make([]Document, 0, limit)
+	var result []Document
+	if limit <= 0 {
+		result = make([]Document, 0)
+	} else {
+		result = make([]Document, 0, limit)
+	}
 	for _, document := range s.idMap {
 		if document.status != status {
 			continue
 		}
 		result = append(result, document)
-		if len(result) >= limit {
+		if limit > 0 && len(result) >= limit {
 			break
 		}
 	}
