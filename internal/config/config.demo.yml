@@ -1,0 +1,15 @@
+addr: ":8080"
+auth_token: ""
+log_level: "info"
+default_storage: "memory"
+document_store: "sqlite"
+sqlite_path: "document-archive.db"
+allow_cors: []
+s3:
+  endpoint: ""
+  bucket: ""
+  region: "us-east-1"
+  access_key_id: ""
+  secret_access_key: ""
+  session_token: ""
+  use_path_style: false
