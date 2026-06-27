@@ -23,14 +23,14 @@ func NewRouter(cfg config.Config, app *archive.App) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
-	mux.Handle("POST /v1/documents/request", withAuth(cfg, http.HandlerFunc(router.requestDocument)))
-	mux.Handle("POST /v1/documents/query", withAuth(cfg, http.HandlerFunc(router.queryDocument)))
-	mux.Handle("GET /v1/documents/{document_id}", withAuth(cfg, http.HandlerFunc(router.getDocument)))
-	mux.Handle("DELETE /v1/documents/{document_id}", withAuth(cfg, http.HandlerFunc(router.removeDocument)))
-	mux.Handle("GET /v1/documents/{document_id}/manifest", withAuth(cfg, http.HandlerFunc(router.getManifest)))
-	mux.Handle("POST /v1/documents/{document_id}/refresh", withAuth(cfg, http.HandlerFunc(router.refreshDocument)))
-	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", withAuth(cfg, http.HandlerFunc(router.getPage)))
-	return mux
+	mux.Handle("POST /v1/documents/request", preprocessChainHandler(cfg, http.HandlerFunc(router.requestDocument)))
+	mux.Handle("POST /v1/documents/query", preprocessChainHandler(cfg, http.HandlerFunc(router.queryDocument)))
+	mux.Handle("GET /v1/documents/{document_id}", preprocessChainHandler(cfg, http.HandlerFunc(router.getDocument)))
+	mux.Handle("DELETE /v1/documents/{document_id}", preprocessChainHandler(cfg, http.HandlerFunc(router.removeDocument)))
+	mux.Handle("GET /v1/documents/{document_id}/manifest", preprocessChainHandler(cfg, http.HandlerFunc(router.getManifest)))
+	mux.Handle("POST /v1/documents/{document_id}/refresh", preprocessChainHandler(cfg, http.HandlerFunc(router.refreshDocument)))
+	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", preprocessChainHandler(cfg, http.HandlerFunc(router.getPage)))
+	return corsHandler(cfg, mux)
 }
 
 func (r *Router) health(w http.ResponseWriter, req *http.Request) {
