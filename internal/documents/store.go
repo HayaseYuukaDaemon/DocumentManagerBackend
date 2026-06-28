@@ -91,6 +91,9 @@ func (qb QueryBuilder) Build() (DocumentQuery, error) {
 	} else {
 		qb.orderBy = "id"
 	}
+	if qb.limit == 0 {
+		qb.limit = 10
+	}
 	return DocumentQuery(qb), nil
 }
 
