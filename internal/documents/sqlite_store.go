@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"document-archive/internal/sources"
@@ -209,25 +210,77 @@ func (s *SQLiteStore) Get(ctx context.Context, id int) (Document, error) {
 	return document, nil
 }
 
-func (s *SQLiteStore) GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error) {
+func (s *SQLiteStore) Query(ctx context.Context, query DocumentQuery) ([]Document, error) {
 	if err := ctx.Err(); err != nil {
-		return Document{}, err
+		return nil, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return Document{}, err
+		return nil, err
 	}
 	defer rollback(tx)
 
-	document, err := getBySourceDocumentIDTx(ctx, tx, source, sourceDocumentID, true)
+	sqlQuery := `SELECT
+		id, source, source_document_id, source_meta, title, storage_backend, document_status,
+		progress_done, progress_total, error, created_at, updated_at
+		FROM documents`
+	where := make([]string, 0, 3)
+	args := make([]any, 0, 4)
+
+	if query.status != nil {
+		where = append(where, "document_status = ?")
+		args = append(args, string(*query.status))
+	} else {
+		where = append(where, "document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')")
+	}
+	if query.source != nil {
+		where = append(where, "source = ?", "source_document_id = ?")
+		args = append(args, string(*query.source), *query.sourceDocumentID)
+	}
+	if len(where) > 0 {
+		sqlQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+
+	sqlQuery += " ORDER BY " + query.orderBy + " " + query.order
+
+	if query.limit > 0 {
+		sqlQuery += " LIMIT ?"
+		args = append(args, query.limit)
+	}
+
+	rows, err := tx.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
-		return Document{}, err
+		return nil, err
+	}
+
+	capacity := max(query.limit, 0)
+	result := make([]Document, 0, capacity)
+	for rows.Next() {
+		document, err := scanDocument(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, document)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for i := range result {
+		pages, err := listPagesTx(ctx, tx, result[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		result[i].Pages = pages
 	}
 	if err := tx.Commit(); err != nil {
-		return Document{}, err
+		return nil, err
 	}
-	return document, nil
+	return result, nil
 }
 
 func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
@@ -257,66 +310,6 @@ func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
 		return Document{}, err
 	}
 	return document, nil
-}
-
-func (s *SQLiteStore) ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	defer rollback(tx)
-	query := `SELECT
-		id, source, source_document_id, source_meta, title, storage_backend, document_status,
-		progress_done, progress_total, error, created_at, updated_at
-		FROM documents
-		WHERE document_status = ?
-		ORDER BY id`
-	var rows *sql.Rows
-	if limit <= 0 {
-		rows, err = tx.QueryContext(ctx, query, string(status))
-	} else {
-		rows, err = tx.QueryContext(ctx, query+" LIMIT ?", string(status), limit)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	capacity := 0
-	if limit > 0 {
-		capacity = limit
-	}
-	result := make([]Document, 0, capacity)
-	for rows.Next() {
-		document, err := scanDocument(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, document)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	// 在关闭文档行游标后加载页面。在只有一个 SQLite 连接的情况下，
-	// 在发出另一个查询时保持游标打开可能会造成不必要的序列化
-	// 或阻塞后续的语句。
-	for i := range result {
-		pages, err := listPagesTx(ctx, tx, result[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		result[i].Pages = pages
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return result, nil
 }
 
 func extractDocumentMeta(document Document) DocumentMeta {

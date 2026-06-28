@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,16 +17,93 @@ var ErrAlreadyExists = errors.New("document already exists")
 var ErrPageNotFound = errors.New("page not found")
 var ErrPageAlreadyExists = errors.New("page already exists")
 
+type QueryBuilder struct {
+	source           *sources.SourceType
+	sourceDocumentID *string
+
+	status *DocumentStatus
+
+	orderBy string // 比如ORDER BY ID, 这里填ID
+	order   string // 比如ASC/DESC, 这里填ASC/DESC
+	limit   int
+}
+
+func (qb QueryBuilder) BySourceDocumentID(source sources.SourceType, sourceDocumentID string) QueryBuilder {
+	qb.source = &source
+	qb.sourceDocumentID = &sourceDocumentID
+	return qb
+}
+
+func (qb QueryBuilder) ByStatus(status DocumentStatus) QueryBuilder {
+	qb.status = &status
+	return qb
+}
+
+func (qb QueryBuilder) OrderBy(orderBy string) QueryBuilder {
+	qb.orderBy = orderBy
+	return qb
+}
+
+func (qb QueryBuilder) Order(order string) QueryBuilder {
+	qb.order = order
+	return qb
+}
+
+func (qb QueryBuilder) Limit(limit int) QueryBuilder {
+	qb.limit = limit
+	return qb
+}
+
+func (qb QueryBuilder) Build() (DocumentQuery, error) {
+	if qb.source != nil && qb.sourceDocumentID == nil {
+		return DocumentQuery{}, ErrQueryParamMismatch{
+			Expected: "sourceDocumentID",
+			Actual:   "nil",
+		}
+	}
+	if qb.source == nil && qb.sourceDocumentID != nil {
+		return DocumentQuery{}, ErrQueryParamMismatch{
+			Expected: "source",
+			Actual:   "nil",
+		}
+	}
+	if qb.order != "" {
+		switch qb.order {
+		case "ASC", "DESC":
+		default:
+			return DocumentQuery{}, ErrQueryParamMismatch{
+				Expected: "ASC or DESC",
+				Actual:   qb.order,
+			}
+		}
+	} else {
+		qb.order = "ASC"
+	}
+	if qb.orderBy != "" {
+		switch qb.orderBy {
+		case "id", "created_at", "updated_at":
+		default:
+			return DocumentQuery{}, ErrQueryParamMismatch{
+				Expected: "id or created_at or updated_at",
+				Actual:   qb.orderBy,
+			}
+		}
+	} else {
+		qb.orderBy = "id"
+	}
+	return DocumentQuery(qb), nil
+}
+
 type Store interface {
 	Create(ctx context.Context, document Document) (Document, error)
 	Get(ctx context.Context, id int) (Document, error)
-	GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error)
 	Remove(ctx context.Context, id int) (Document, error)
-	ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error)
 	UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error)
 	TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error
 	AddPage(ctx context.Context, id int, page Page) error
 	RemovePage(ctx context.Context, id int, pageIndex int) error
+
+	Query(ctx context.Context, query DocumentQuery) ([]Document, error)
 }
 
 type MemoryStore struct {
@@ -54,21 +132,6 @@ func (s *MemoryStore) Get(ctx context.Context, id int) (Document, error) {
 		return Document{}, ErrNotFound
 	}
 	return d, nil
-}
-
-func (s *MemoryStore) GetBySourceDocumentID(ctx context.Context, source sources.SourceType, sourceDocumentID string) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return Document{}, err
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, d := range s.idMap {
-		if d.Source == source && d.SourceDocumentID == sourceDocumentID && isVisibleDocumentStatus(d.status) {
-			return d, nil
-		}
-	}
-	return Document{}, ErrNotFound
 }
 
 func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, error) {
@@ -135,27 +198,43 @@ func (s *MemoryStore) Remove(ctx context.Context, id int) (Document, error) {
 	return document, nil
 }
 
-func (s *MemoryStore) ListByStatus(ctx context.Context, status DocumentStatus, limit int) ([]Document, error) {
+func (s *MemoryStore) Query(ctx context.Context, query DocumentQuery) ([]Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var result []Document
-	if limit <= 0 {
-		result = make([]Document, 0)
-	} else {
-		result = make([]Document, 0, limit)
-	}
+
+	result := make([]Document, 0)
 	for _, document := range s.idMap {
-		if document.status != status {
+		if query.status != nil {
+			if document.status != *query.status {
+				continue
+			}
+		} else if !isVisibleDocumentStatus(document.status) {
 			continue
 		}
-		result = append(result, document)
-		if limit > 0 && len(result) >= limit {
-			break
+
+		if query.source != nil {
+			if document.Source != *query.source || document.SourceDocumentID != *query.sourceDocumentID {
+				continue
+			}
 		}
+
+		result = append(result, document)
+	}
+
+	sort.SliceStable(result, func(i, j int) bool {
+		cmp := compareDocumentsByQueryOrder(result[i], result[j], query.orderBy)
+		if query.order == "DESC" {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+
+	if query.limit > 0 && len(result) > query.limit {
+		result = result[:query.limit]
 	}
 	return result, nil
 }
@@ -284,4 +363,37 @@ func (s *MemoryStore) removePageLocked(id int, pageIndex int, now time.Time) err
 
 func pageSlotExists(page Page, index int) bool {
 	return page.Index == index && page.Key != ""
+}
+
+func compareDocumentsByQueryOrder(left Document, right Document, orderBy string) int {
+	switch orderBy {
+	case "created_at":
+		return compareTime(left.CreatedAt, right.CreatedAt)
+	case "updated_at":
+		return compareTime(left.UpdatedAt, right.UpdatedAt)
+	default:
+		return compareInt(left.ID, right.ID)
+	}
+}
+
+func compareInt(left int, right int) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareTime(left time.Time, right time.Time) int {
+	switch {
+	case left.Before(right):
+		return -1
+	case left.After(right):
+		return 1
+	default:
+		return 0
+	}
 }

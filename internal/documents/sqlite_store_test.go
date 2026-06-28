@@ -70,7 +70,7 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreDeletedDocumentsAreHidden(t *testing.T) {
+func TestSQLiteStoreDeletedDocumentsAreHiddenUnlessExplicitlyQueried(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteStore(t)
 	defer store.Close()
@@ -90,15 +90,17 @@ func TestSQLiteStoreDeletedDocumentsAreHidden(t *testing.T) {
 	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected deleted document to be hidden by Get, got %v", err)
 	}
-	if _, err := store.GetBySourceDocumentID(ctx, testSource, "sqlite-deleted"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected deleted document to be hidden by source lookup, got %v", err)
+	bySource := queryDocuments(t, store, QueryBuilder{}.BySourceDocumentID(testSource, "sqlite-deleted"))
+	if len(bySource) != 0 {
+		t.Fatalf("expected deleted document to be hidden by implicit source query, got %#v", bySource)
 	}
-	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
-	if err != nil {
-		t.Fatalf("ListByStatus returned error: %v", err)
-	}
+	queued := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusQueued).Limit(10))
 	if len(queued) != 0 {
-		t.Fatalf("expected deleted document to be hidden by ListByStatus, got %#v", queued)
+		t.Fatalf("expected deleted document to be absent from queued query, got %#v", queued)
+	}
+	deleted := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusDeleted).Limit(10))
+	if len(deleted) != 1 || deleted[0].ID != doc.ID {
+		t.Fatalf("expected explicit deleted query to return document, got %#v", deleted)
 	}
 }
 
@@ -161,10 +163,7 @@ func TestSQLiteStoreTransitionToValidatesStateGraph(t *testing.T) {
 	if err := store.TransitionTo(ctx, doc.ID, StatusArchived); err != nil {
 		t.Fatalf("resolving -> archived should be valid for metadata refresh: %v", err)
 	}
-	archived, err := store.ListByStatus(ctx, StatusArchived, 10)
-	if err != nil {
-		t.Fatalf("ListByStatus returned error: %v", err)
-	}
+	archived := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusArchived).Limit(10))
 	if len(archived) != 1 || archived[0].ID != doc.ID {
 		t.Fatalf("expected archived document after transition, got %#v", archived)
 	}
@@ -186,10 +185,7 @@ func TestSQLiteStoreTransitionToRejectsInvalidStateGraph(t *testing.T) {
 	if err := store.TransitionTo(ctx, doc.ID, StatusArchived); err == nil {
 		t.Fatalf("queued -> archived should be rejected")
 	}
-	queued, err := store.ListByStatus(ctx, StatusQueued, 10)
-	if err != nil {
-		t.Fatalf("ListByStatus returned error: %v", err)
-	}
+	queued := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusQueued).Limit(10))
 	if len(queued) != 1 || queued[0].ID != doc.ID {
 		t.Fatalf("expected document to remain queued after invalid transition, got %#v", queued)
 	}
@@ -213,10 +209,7 @@ func TestSQLiteStoreTransitionDeletedToPurged(t *testing.T) {
 	if err := store.TransitionTo(ctx, doc.ID, StatusPurged); err != nil {
 		t.Fatalf("deleted -> purged should be valid: %v", err)
 	}
-	purged, err := store.ListByStatus(ctx, StatusPurged, 10)
-	if err != nil {
-		t.Fatalf("ListByStatus returned error: %v", err)
-	}
+	purged := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusPurged).Limit(10))
 	if len(purged) != 1 || purged[0].ID != doc.ID {
 		t.Fatalf("expected purged document after transition, got %#v", purged)
 	}

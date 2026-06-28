@@ -147,16 +147,29 @@ const (
 )
 
 type QueryInput struct {
-	Mode   QueryMode       `json:"mode"`
-	Params json.RawMessage `json:"params,omitempty"`
+	Mode    QueryMode       `json:"mode"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Limit   int             `json:"limit,omitempty"`
+	OrderBy string          `json:"orderby,omitempty"`
+	Order   string          `json:"order,omitempty"`
 }
 
 type QueryByStatusParams struct {
 	Status DocumentStatus `json:"status"`
-	Limit  int            `json:"limit,omitempty"`
 }
 
 type QueryBySourceDocumentIDParams struct {
 	Source           sources.SourceType `json:"source"`
 	SourceDocumentID string             `json:"source_document_id"`
 }
+
+type ErrQueryParamMismatch struct {
+	Expected string
+	Actual   string
+}
+
+func (e ErrQueryParamMismatch) Error() string {
+	return "query param mismatch: expected " + e.Expected + ", got " + e.Actual
+}
+
+type DocumentQuery QueryBuilder

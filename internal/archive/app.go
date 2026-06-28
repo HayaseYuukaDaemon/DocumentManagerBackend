@@ -126,30 +126,33 @@ func (a *App) GetPage(ctx context.Context, document documents.Document, pageInde
 }
 
 func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
+	qb := documents.QueryBuilder{}
 	switch input.Mode {
 	case documents.QueryBySourceDocumentID:
 		var params documents.QueryBySourceDocumentIDParams
 		if err := json.Unmarshal(input.Params, &params); err != nil {
 			return nil, fmt.Errorf("decode query params: %w", err)
 		}
-		document, err := a.documents.GetBySourceDocumentID(ctx, params.Source, params.SourceDocumentID)
-		if err != nil {
-			return nil, err
-		}
-		return []documents.Document{document}, nil
+		qb = qb.BySourceDocumentID(params.Source, params.SourceDocumentID)
+
 	case documents.QueryByStatus:
 		var params documents.QueryByStatusParams
 		if err := json.Unmarshal(input.Params, &params); err != nil {
 			return nil, fmt.Errorf("decode query params: %w", err)
 		}
-		documents, err := a.documents.ListByStatus(ctx, params.Status, params.Limit)
-		if err != nil {
-			return nil, err
-		}
-		return documents, nil
+		qb = qb.ByStatus(params.Status)
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}
+	query, err := qb.OrderBy(input.OrderBy).Order(input.Order).Limit(input.Limit).Build()
+	if err != nil {
+		return nil, err
+	}
+	documents, err := a.documents.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return documents, nil
 }
 
 func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.RefreshMode) (documents.Document, error) {
@@ -195,7 +198,13 @@ func (a *App) RunWorker(ctx context.Context) {
 }
 
 func (a *App) processQueued(ctx context.Context) {
-	queued, err := a.documents.ListByStatus(ctx, documents.StatusQueued, 5)
+	qb := documents.QueryBuilder{}
+	query, err := qb.ByStatus(documents.StatusQueued).Limit(5).Build()
+	if err != nil {
+		a.logger.Error("build queued documents query failed", "error", err)
+		return
+	}
+	queued, err := a.documents.Query(ctx, query)
 	if err != nil {
 		a.logger.Error("list queued documents failed", "error", err)
 		return
