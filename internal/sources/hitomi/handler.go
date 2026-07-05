@@ -46,16 +46,21 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 	pageLength := len(document.Pages)
 	var archivedPages []documents.Page
 	for index, page := range resolvedComic.Pages {
-		key := archive.PageObjectKey(strconv.Itoa(document.ID), index, page.ContentType)
 		if pageLength > 0 && index < pageLength {
 			oldPage := document.Pages[index]
-			if err == nil {
-				if page.Hash == oldPage.Hash {
-					continue
+			if page.Hash == oldPage.Hash {
+				continue
+			} else {
+				return archivedPages, sources.ErrPageHashMismatch{
+					DocumentID: document.ID,
+					PageIndex:  index,
+					Expected:   oldPage.Hash,
+					Actual:     page.Hash,
 				}
 			}
 		}
 
+		key := archive.PageObjectKey(strconv.Itoa(document.ID), index, page.ContentType)
 		buf := bytes.Buffer{}
 		err = h.resolver.DownloadPage(ctx, page, &buf)
 		if err != nil {

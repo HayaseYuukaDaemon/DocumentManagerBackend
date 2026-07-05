@@ -127,7 +127,6 @@ func (d *DocumentMeta) Status() DocumentStatus {
 type RequestDocumentInput struct {
 	Source           sources.SourceType  `json:"source"`
 	SourceDocumentID string              `json:"source_document_id"`
-	SourceMeta       json.RawMessage     `json:"source_meta,omitempty"`
 	StorageBackend   storage.StorageName `json:"storage_backend,omitempty"`
 }
 
@@ -144,6 +143,7 @@ type RefreshMode string
 const (
 	OnlyMetaData RefreshMode = "only_meta_data"
 	All          RefreshMode = "all"
+	Restore      RefreshMode = "restore"
 )
 
 type QueryInput struct {

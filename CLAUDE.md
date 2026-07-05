@@ -31,14 +31,14 @@
 - [internal/config/](internal/config/) 读取配置。优先级为默认值 < `config.yml`；不读取环境变量。默认值包括 `addr=:8080`、`document_store=sqlite`、`sqlite_path=document-archive.db`、`default_storage=memory`、`allow_cors=[]`。设置 `auth_token` 后会启用 Bearer Token 鉴权。
 - [internal/httpapi/](internal/httpapi/) 是 HTTP 层。它使用 Go 的 `http.ServeMux` 路由模式，并把业务操作委托给 `archive.App`。所有 `/v1/...` 业务路由在配置 token 后都会经过鉴权；`/healthz` 是公开接口。CORS 作为 mux 外层 middleware 统一处理，`allow_cors` 为空时不启用 CORS，非空时按显式 Origin 白名单或 `"*"` 匹配，预检请求会在鉴权前返回。
 - [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源处理器和对象存储。`RunWorker` 每秒轮询 queued 文档，解析元数据、下载内容、通过页面下载 hook 写入页面更新，并推进文档状态。
-- [internal/documents/](internal/documents/) 定义公开文档模型和 store 接口。当前有两个实现：[internal/documents/store.go](internal/documents/store.go) 中的内存存储，以及 [internal/documents/sqlite_store.go](internal/documents/sqlite_store.go) 中的 SQLite 存储。SQLite 存储把文档和页面放在两张表中，使用 `document_status` 表达完整文档状态，并对 active 状态下的 `(source, source_document_id)` 组合保持唯一约束。
+- [internal/documents/](internal/documents/) 定义公开文档模型和 store 接口。当前有两个实现：[internal/documents/store.go](internal/documents/store.go) 中的内存存储，以及 [internal/documents/sqlite_store.go](internal/documents/sqlite_store.go) 中的 SQLite 存储。SQLite 存储把文档和页面放在两张表中，使用 `document_status` 表达完整文档状态，并按全局唯一模型对 `(source, source_document_id)` 组合保持唯一约束。
 - [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。当前实现包括 `MemoryStore` 和 S3-compatible `S3Store`。memory 对象保存在进程内存中，S3 对象通过 AWS SDK v2 访问，可配置 endpoint、bucket、region、credentials 和 path-style 行为。
 - [internal/sources/](internal/sources/) 包含来源抽象。[internal/sources/hitomi/](internal/sources/hitomi/) 是当前的 Hitomi handler/resolver：获取图库元数据、解析页面下载 URL、下载页面、写入对象，并向 archive app 发出页面更新。
 
 ## 请求流程
 
 1. `POST /v1/documents/request` 通过 `archive.App.RequestDocument` 创建 `queued` 文档。
-2. 后台 worker 调用 `ListByStatus(queued, 5)` 获取待处理文档并逐个处理。
+2. 后台 worker 通过显式 `queued` 状态查询获取待处理文档并逐个处理。
 3. 处理时先通过 `TransitionTo` 把状态设为 `resolving`，调用来源 handler 生成 manifest，并根据 manifest 页数提前写入 `Progress.Total`。
 4. 首次下载内容时状态进入 `downloading`；每个已下载页面都会通过来源 handler 的 page-download hook 增量写入文档存储，并由 store 维护 `Progress.Done`。
 5. 成功后状态变为 `archived`；失败后状态变为 `failed`，并记录错误信息。
@@ -47,7 +47,7 @@
 ## HTTP API 注意事项
 
 - 已实现的路由包括：请求归档文档、按来源文档 ID 查询、按状态查询、获取文档、软删除、刷新、获取页面。
-- `QueryByStatus` / `ListByStatus` 是授权控制面语义：调用方显式传入什么状态，就按该状态查询，包括 `deleted` / `purged`。这与 `Get` / `GetBySourceDocumentID` 的常规读取语义不同。
+- `QueryByStatus` / 显式状态查询是授权控制面语义：调用方显式传入什么状态，就按该状态查询，包括 `deleted` / `purged`。这与 `Get` / 默认查询 / 按来源 ID 的隐式查询语义不同。
 - `GET /v1/documents/{document_id}/manifest` 当前返回 `501 Not Implemented`。
 - `GET /v1/documents/{document_id}/pages/{page_index}` 对 memory storage backend 直接返回对象内容；对 S3 等非 memory backend 返回预签名 GET URL 的 302 redirect。
 - CORS 由 `allow_cors` 控制。空列表表示不返回 CORS header；列表中可配置精确 Origin 或 `"*"`。CORS middleware 在鉴权前处理 OPTIONS preflight，因此浏览器预检不需要 Bearer Token。
@@ -57,6 +57,8 @@
 - `DocumentStatus` 是文档的统一状态字段，当前状态包括：`queued`、`resolving`、`downloading`、`archived`、`failed`、`deleted`、`purged`。
 - `Document.status` 是私有字段，外部通过 `Status()` 读取；JSON 输出通过自定义 `MarshalJSON` 导出为 `status`。
 - 状态变更必须走 `Store.TransitionTo`，不要在 meta 更新或业务逻辑中直接覆盖状态字段。
+- `source + source_document_id` 按全局唯一模型建模：整个 `documents` 集合中最多只能有一条对应记录，`deleted` / `purged` 记录也继续占用该身份。
+- 因此默认 `Create` 只用于首次引入该来源文档；如果未来需要“重新加回”已删除/已清理文档，应设计显式 restore/requeue 语义，而不是再次插入新记录。
 - 当前合法状态流转为：
   - `queued -> resolving | failed | deleted`
   - `resolving -> downloading | archived | failed | deleted`
@@ -65,14 +67,14 @@
   - `failed -> queued | deleted`
   - `deleted -> purged`
   - `purged` 为终态
-- `Get`、`GetBySourceDocumentID`、`UpdateMeta`、页面增删等常规操作只处理 active 状态：`queued`、`resolving`、`downloading`、`archived`、`failed`。
-- `ListByStatus` 是显式状态查询，允许返回 `deleted` / `purged`，用于授权查询和维护任务。
+- `Get`、默认 `Query`、`QueryBuilder{}.BySourceDocumentID(...)`、`UpdateMeta`、页面增删等常规操作只处理 active 状态：`queued`、`resolving`、`downloading`、`archived`、`failed`。
+- 显式状态查询允许返回 `deleted` / `purged`，用于授权查询和维护任务；在全局唯一模型下，这些查询看到的仍然是同一条实体记录，而不是历史版本列表。
 
 ## 数据与存储注意事项
 
 - 不同文档存储的 ID 语义不同：内存存储使用从 0 开始的 slice 下标，SQLite 使用自增 ID。
-- 两种文档存储中的 `Remove` 都是软删除：将状态流转为 `deleted`。已删除文档不会出现在常规 `Get` / `GetBySourceDocumentID` 中，但会在显式 `ListByStatus(deleted, ...)` 中返回。
-- SQLite 的 `documents.document_status` 有 CHECK 约束；active 状态下的 `(source, source_document_id)` 有唯一索引，删除或清理后可以重新创建同来源同 ID 文档。
+- 两种文档存储中的 `Remove` 都是软删除：将状态流转为 `deleted`。已删除文档不会出现在常规 `Get` / 默认 `Query` / 按来源 ID 的隐式查询中，但会在显式 `deleted` 状态查询中返回。
+- SQLite 的 `documents.document_status` 有 CHECK 约束；`(source, source_document_id)` 在整张 `documents` 表上全局唯一。删除或清理后不会释放该身份，后续如需重新加入应通过显式状态流转完成。
 - 当前服务总会注册 memory object store；当配置 `s3.bucket` 或 `default_storage=s3` 时也会注册 S3-compatible object store。
 - `storage.ObjectInfo.ETag` 是对象抽象层暴露给 HTTP/browser 的 ETag。`PutObject` 输入携带 ETag 时 storage 原样保存并返回；未携带时优先使用具体后端提供的 ETag（例如 S3 原生 ETag），后端未提供时再由 storage 基于对象内容计算。S3 后端把自定义输入 ETag 写入 user metadata `archive-etag`，以便后续 `HEAD/GET` 能读回同一个值。
 - SQLite 初始化会设置 WAL 模式、busy timeout、单连接和 foreign keys。文档/页面更新应保持事务化，避免页面 hook 与状态流转之间发生陈旧写入。

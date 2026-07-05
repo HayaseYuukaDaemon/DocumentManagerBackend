@@ -99,9 +99,13 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(document_status, id)`); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_active_source_identity
-		ON documents(source, source_document_id)
-		WHERE document_status IN ('queued', 'resolving', 'downloading', 'archived', 'failed')`); err != nil {
+	// 历史上这里曾是只覆盖 active 状态的局部唯一索引；当前语义收敛为
+	// 整个 documents 表上全局唯一，因此启动时直接移除旧索引并创建新的全局唯一索引。
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_documents_active_source_identity`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_identity
+		ON documents(source, source_document_id)`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_index)`); err != nil {
@@ -126,7 +130,7 @@ func (s *SQLiteStore) Create(ctx context.Context, document Document) (Document, 
 	}
 	defer rollback(tx)
 
-	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, true)
+	existing, err := getBySourceDocumentIDTx(ctx, tx, document.Source, document.SourceDocumentID, false)
 	switch {
 	case err == nil:
 		return existing, ErrAlreadyExists
@@ -210,17 +214,7 @@ func (s *SQLiteStore) Get(ctx context.Context, id int) (Document, error) {
 	return document, nil
 }
 
-func (s *SQLiteStore) Query(ctx context.Context, query DocumentQuery) ([]Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	defer rollback(tx)
-
+func (s *SQLiteStore) query(ctx context.Context, query DocumentQuery, tx *sql.Tx) ([]Document, error) {
 	sqlQuery := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,
 		progress_done, progress_total, error, created_at, updated_at
@@ -277,13 +271,32 @@ func (s *SQLiteStore) Query(ctx context.Context, query DocumentQuery) ([]Documen
 		}
 		result[i].Pages = pages
 	}
+	return result, nil
+}
+
+func (s *SQLiteStore) Query(ctx context.Context, query DocumentQuery) ([]Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+
+	result, err := s.query(ctx, query, tx)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
+func (s *SQLiteStore) Delete(ctx context.Context, id int) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
@@ -299,7 +312,7 @@ func (s *SQLiteStore) Remove(ctx context.Context, id int) (Document, error) {
 		return Document{}, err
 	}
 	if !canTransitionDocumentStatus(document.status, StatusDeleted) {
-		return Document{}, fmt.Errorf("invalid document status transition: %s -> %s", document.status, StatusDeleted)
+		return Document{}, ErrInvalidStatusTransition{From: document.status, To: StatusDeleted}
 	}
 	document.status = StatusDeleted
 	document.UpdatedAt = time.Now().UTC()
@@ -345,7 +358,6 @@ func (s *SQLiteStore) updateMeta(ctx context.Context, id int, fn func(*DocumentM
 		return Document{}, err
 	}
 	fillDocumentMeta(&document, meta)
-	document.ID = id
 	document.UpdatedAt = time.Now().UTC()
 
 	if err := updateDocumentTx(ctx, tx, document); err != nil {
@@ -380,7 +392,22 @@ func (s *SQLiteStore) UpdateMeta(ctx context.Context, id int, fn func(*DocumentM
 }
 
 func (s *SQLiteStore) addPage(ctx context.Context, id int, page Page, tx *sql.Tx) error {
-	_, err := s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
+	if page.Index < 0 {
+		return fmt.Errorf("invalid page index: %d", page.Index)
+	}
+
+	var exists int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM document_pages WHERE document_id = ? AND page_index = ?`, id, page.Index).Scan(&exists)
+	switch {
+	case err == nil:
+		return ErrPageAlreadyExists{DocumentID: id, PageIndex: page.Index}
+	case errors.Is(err, sql.ErrNoRows):
+		// continue
+	default:
+		return err
+	}
+
+	_, err = s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
 		meta.Progress.Done++
 		if meta.Progress.Total < meta.Progress.Done {
 			meta.Progress.Total = meta.Progress.Done
@@ -473,6 +500,81 @@ func (s *SQLiteStore) RemovePage(ctx context.Context, id int, pageIndex int) err
 	return nil
 }
 
+func (s *SQLiteStore) Purge(ctx context.Context, id int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer rollback(tx)
+
+	document, err := getTx(ctx, tx, id, false)
+	if err != nil {
+		return 0, err
+	}
+	if !canTransitionDocumentStatus(document.status, StatusPurged) {
+		return 0, ErrInvalidStatusTransition{From: document.status, To: StatusPurged}
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ?`, id)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	document.Pages = nil
+	document.Progress.Done = 0
+	document.Progress.Total = 0
+	document.status = StatusPurged
+	document.UpdatedAt = time.Now().UTC()
+	if err := updateDocumentTx(ctx, tx, document); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+func (s *SQLiteStore) Restore(ctx context.Context, id int) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return Document{}, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Document{}, err
+	}
+	defer rollback(tx)
+
+	document, err := getTx(ctx, tx, id, false)
+	if err != nil {
+		return Document{}, err
+	}
+	switch document.status {
+	case StatusDeleted, StatusPurged:
+		document.status = StatusQueued
+		document.UpdatedAt = time.Now().UTC()
+	default:
+		return Document{}, ErrInvalidStatusTransition{From: document.status, To: StatusQueued}
+	}
+
+	if err := updateDocumentTx(ctx, tx, document); err != nil {
+		return Document{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Document{}, err
+	}
+	return document, nil
+}
+
 func getTx(ctx context.Context, tx *sql.Tx, id int, visibleOnly bool) (Document, error) {
 	query := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,
@@ -526,7 +628,12 @@ func (s *SQLiteStore) TransitionTo(ctx context.Context, id int, newStatus Docume
 		return err
 	}
 	if !canTransitionDocumentStatus(document.status, newStatus) {
-		return fmt.Errorf("invalid document status transition: %s -> %s", document.status, newStatus)
+		return ErrInvalidStatusTransition{From: document.status, To: newStatus}
+	}
+	if newStatus == StatusPurged {
+		if err := validatePurgedDocumentState(document); err != nil {
+			return err
+		}
 	}
 
 	document.status = newStatus

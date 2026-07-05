@@ -39,3 +39,8 @@
   - 当前`StorageName`既有名称也有类型的语义, 同一类型也可能有多个实现, 比如s3后端可以是本地minio, 也可能是cloudflare R2.
 
 - 为hitomi handler添加限流机制
+
+- 按全局唯一模型补齐“重新加回”语义
+  - 同一个`source` + `source_document_id`始终只对应一条 document 记录
+  - 如需重新加回已删除 / 已清理文档, 应通过显式 restore / requeue 流转实现, 而不是再次 Create 新记录
+  - 候选流转: `deleted -> queued` / `purged -> queued`

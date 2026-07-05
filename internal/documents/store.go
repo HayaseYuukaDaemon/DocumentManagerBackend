@@ -15,7 +15,51 @@ import (
 var ErrNotFound = errors.New("document not found")
 var ErrAlreadyExists = errors.New("document already exists")
 var ErrPageNotFound = errors.New("page not found")
-var ErrPageAlreadyExists = errors.New("page already exists")
+
+type ErrPageAlreadyExists struct {
+	DocumentID int
+	PageIndex  int
+}
+
+func (e ErrPageAlreadyExists) Error() string {
+	return fmt.Sprintf("page already exists at index %d for document %d", e.PageIndex, e.DocumentID)
+}
+
+func (e ErrPageAlreadyExists) Is(target error) bool {
+	typed, ok := target.(ErrPageAlreadyExists)
+	if !ok {
+		return false
+	}
+	if typed.DocumentID != 0 && e.DocumentID != typed.DocumentID {
+		return false
+	}
+	if typed.PageIndex != 0 && e.PageIndex != typed.PageIndex {
+		return false
+	}
+	return true
+}
+
+type ErrInvalidStatusTransition struct {
+	From, To DocumentStatus
+}
+
+func (e ErrInvalidStatusTransition) Error() string {
+	return fmt.Sprintf("invalid status transition from %s to %s", e.From, e.To)
+}
+
+func (e ErrInvalidStatusTransition) Is(target error) bool {
+	typed, ok := target.(ErrInvalidStatusTransition)
+	if !ok {
+		return false
+	}
+	if typed.From != "" && e.From != typed.From {
+		return false
+	}
+	if typed.To != "" && e.To != typed.To {
+		return false
+	}
+	return true
+}
 
 type QueryBuilder struct {
 	source           *sources.SourceType
@@ -36,6 +80,11 @@ func (qb QueryBuilder) BySourceDocumentID(source sources.SourceType, sourceDocum
 
 func (qb QueryBuilder) ByStatus(status DocumentStatus) QueryBuilder {
 	qb.status = &status
+	return qb
+}
+
+func (qb QueryBuilder) Visible(source sources.SourceType) QueryBuilder {
+	qb.source = &source
 	return qb
 }
 
@@ -100,12 +149,13 @@ func (qb QueryBuilder) Build() (DocumentQuery, error) {
 type Store interface {
 	Create(ctx context.Context, document Document) (Document, error)
 	Get(ctx context.Context, id int) (Document, error)
-	Remove(ctx context.Context, id int) (Document, error)
+	Delete(ctx context.Context, id int) (Document, error)
+	Purge(ctx context.Context, id int) (int, error)
+	Restore(ctx context.Context, id int) (Document, error)
 	UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error)
 	TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error
 	AddPage(ctx context.Context, id int, page Page) error
 	RemovePage(ctx context.Context, id int, pageIndex int) error
-
 	Query(ctx context.Context, query DocumentQuery) ([]Document, error)
 }
 
@@ -145,7 +195,7 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, d := range s.idMap {
-		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID && isVisibleDocumentStatus(d.status) {
+		if d.Source == document.Source && d.SourceDocumentID == document.SourceDocumentID {
 			return d, ErrAlreadyExists
 		}
 	}
@@ -178,7 +228,7 @@ func (s *MemoryStore) Create(ctx context.Context, document Document) (Document, 
 	return s.idMap[document.ID], nil
 }
 
-func (s *MemoryStore) Remove(ctx context.Context, id int) (Document, error) {
+func (s *MemoryStore) Delete(ctx context.Context, id int) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
@@ -285,9 +335,61 @@ func (s *MemoryStore) TransitionTo(ctx context.Context, id int, newStatus Docume
 	if !canTransitionDocumentStatus(document.status, newStatus) {
 		return fmt.Errorf("invalid document status transition: %s -> %s", document.status, newStatus)
 	}
+	if newStatus == StatusPurged {
+		if err := validatePurgedDocumentState(*document); err != nil {
+			return err
+		}
+	}
 	document.status = newStatus
 	document.UpdatedAt = time.Now().UTC()
 	return nil
+}
+
+func (s *MemoryStore) Purge(ctx context.Context, id int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 0 || id >= len(s.idMap) {
+		return 0, ErrNotFound
+	}
+
+	document := &s.idMap[id]
+	if !canTransitionDocumentStatus(document.status, StatusPurged) {
+		return 0, fmt.Errorf("invalid document status transition: %s -> %s", document.status, StatusPurged)
+	}
+
+	pageCount := countExistingPages(document.Pages)
+	document.Pages = nil
+	document.Progress.Done = 0
+	document.Progress.Total = 0
+	document.status = StatusPurged
+	document.UpdatedAt = time.Now().UTC()
+	return pageCount, nil
+}
+
+func (s *MemoryStore) Restore(ctx context.Context, id int) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return Document{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 0 || id >= len(s.idMap) {
+		return Document{}, ErrNotFound
+	}
+
+	document := &s.idMap[id]
+	switch document.status {
+	case StatusDeleted, StatusPurged:
+		document.status = StatusQueued
+		document.UpdatedAt = time.Now().UTC()
+		return *document, nil
+	default:
+		return Document{}, ErrInvalidStatusTransition{From: document.status, To: StatusQueued}
+	}
 }
 
 func (s *MemoryStore) AddPage(ctx context.Context, id int, page Page) error {
@@ -329,7 +431,7 @@ func (s *MemoryStore) addPageLocked(id int, page Page, now time.Time) error {
 
 	document := &s.idMap[id]
 	if page.Index < len(document.Pages) && pageSlotExists(document.Pages[page.Index], page.Index) {
-		return ErrPageAlreadyExists
+		return ErrPageAlreadyExists{DocumentID: id, PageIndex: page.Index}
 	}
 	for len(document.Pages) <= page.Index {
 		document.Pages = append(document.Pages, Page{})
@@ -366,6 +468,29 @@ func (s *MemoryStore) removePageLocked(id int, pageIndex int, now time.Time) err
 
 func pageSlotExists(page Page, index int) bool {
 	return page.Index == index && page.Key != ""
+}
+
+func countExistingPages(pages []Page) int {
+	count := 0
+	for index, page := range pages {
+		if pageSlotExists(page, index) {
+			count++
+		}
+	}
+	return count
+}
+
+func validatePurgedDocumentState(document Document) error {
+	if document.Progress.Done != 0 {
+		return fmt.Errorf("cannot transition to %s with progress.done=%d", StatusPurged, document.Progress.Done)
+	}
+	if document.Progress.Total != 0 {
+		return fmt.Errorf("cannot transition to %s with progress.total=%d", StatusPurged, document.Progress.Total)
+	}
+	if pageCount := countExistingPages(document.Pages); pageCount != 0 {
+		return fmt.Errorf("cannot transition to %s with %d persisted pages", StatusPurged, pageCount)
+	}
+	return nil
 }
 
 func compareDocumentsByQueryOrder(left Document, right Document, orderBy string) int {

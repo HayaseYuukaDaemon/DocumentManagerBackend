@@ -84,7 +84,7 @@ func TestSQLiteStoreDeletedDocumentsAreHiddenUnlessExplicitlyQueried(t *testing.
 		t.Fatalf("Create returned error: %v", err)
 	}
 
-	if _, err := store.Remove(ctx, doc.ID); err != nil {
+	if _, err := store.Delete(ctx, doc.ID); err != nil {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
@@ -104,7 +104,7 @@ func TestSQLiteStoreDeletedDocumentsAreHiddenUnlessExplicitlyQueried(t *testing.
 	}
 }
 
-func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
+func TestSQLiteStoreCreateAfterRemoveReturnsExistingDocument(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteStore(t)
 	defer store.Close()
@@ -117,7 +117,7 @@ func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, err := store.Remove(ctx, first.ID); err != nil {
+	if _, err := store.Delete(ctx, first.ID); err != nil {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 
@@ -126,11 +126,14 @@ func TestSQLiteStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 		SourceDocumentID: "sqlite-recreate",
 		status:           StatusQueued,
 	})
-	if err != nil {
-		t.Fatalf("second Create returned error: %v", err)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected second Create to return ErrAlreadyExists, got %v", err)
 	}
-	if second.ID <= first.ID {
-		t.Fatalf("expected recreated document to get a new larger ID, first=%d second=%d", first.ID, second.ID)
+	if second.ID != first.ID {
+		t.Fatalf("expected duplicate create after remove to return existing ID %d, got %d", first.ID, second.ID)
+	}
+	if second.Status() != StatusDeleted {
+		t.Fatalf("expected duplicate create after remove to return deleted document, got %s", second.Status())
 	}
 }
 
@@ -191,7 +194,7 @@ func TestSQLiteStoreTransitionToRejectsInvalidStateGraph(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreTransitionDeletedToPurged(t *testing.T) {
+func TestSQLiteStorePurgeMovesDeletedDocumentToPurged(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteStore(t)
 	defer store.Close()
@@ -203,11 +206,11 @@ func TestSQLiteStoreTransitionDeletedToPurged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, err := store.Remove(ctx, doc.ID); err != nil {
+	if _, err := store.Delete(ctx, doc.ID); err != nil {
 		t.Fatalf("Remove returned error: %v", err)
 	}
-	if err := store.TransitionTo(ctx, doc.ID, StatusPurged); err != nil {
-		t.Fatalf("deleted -> purged should be valid: %v", err)
+	if _, err := store.Purge(ctx, doc.ID); err != nil {
+		t.Fatalf("Purge returned error: %v", err)
 	}
 	purged := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusPurged).Limit(10))
 	if len(purged) != 1 || purged[0].ID != doc.ID {

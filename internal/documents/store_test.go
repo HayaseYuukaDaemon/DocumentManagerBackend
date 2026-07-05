@@ -57,7 +57,7 @@ func TestMemoryStoreDeletedDocumentsAreHiddenUnlessExplicitlyQueried(t *testing.
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, err := store.Remove(ctx, doc.ID); err != nil {
+	if _, err := store.Delete(ctx, doc.ID); err != nil {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 	if _, err := store.Get(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
@@ -77,7 +77,7 @@ func TestMemoryStoreDeletedDocumentsAreHiddenUnlessExplicitlyQueried(t *testing.
 	}
 }
 
-func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
+func TestMemoryStoreCreateAfterRemoveReturnsExistingDocument(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
 
@@ -88,7 +88,7 @@ func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, err := store.Remove(ctx, first.ID); err != nil {
+	if _, err := store.Delete(ctx, first.ID); err != nil {
 		t.Fatalf("Remove returned error: %v", err)
 	}
 
@@ -96,11 +96,14 @@ func TestMemoryStoreCreateAfterRemoveAllocatesNewID(t *testing.T) {
 		Source:           testSource,
 		SourceDocumentID: "recreate",
 	})
-	if err != nil {
-		t.Fatalf("second Create returned error: %v", err)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected second Create to return ErrAlreadyExists, got %v", err)
 	}
-	if second.ID <= first.ID {
-		t.Fatalf("expected recreated document to get a new larger ID, first=%d second=%d", first.ID, second.ID)
+	if second.ID != first.ID {
+		t.Fatalf("expected duplicate create after remove to return existing ID %d, got %d", first.ID, second.ID)
+	}
+	if second.Status() != StatusDeleted {
+		t.Fatalf("expected duplicate create after remove to return deleted document, got %s", second.Status())
 	}
 }
 
@@ -114,7 +117,7 @@ func TestMemoryStoreBoundsChecks(t *testing.T) {
 	if _, err := store.Get(ctx, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for empty store, got %v", err)
 	}
-	if _, err := store.Remove(ctx, 0); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Delete(ctx, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for remove missing, got %v", err)
 	}
 	if _, err := store.UpdateMeta(ctx, 0, func(*DocumentMeta) error { return nil }); !errors.Is(err, ErrNotFound) {
@@ -203,7 +206,7 @@ func TestStoreQueryHidesRemovedDocumentsUnlessStatusIsExplicit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create(removed) returned error: %v", err)
 		}
-		if _, err := store.Remove(ctx, removed.ID); err != nil {
+		if _, err := store.Delete(ctx, removed.ID); err != nil {
 			t.Fatalf("Remove returned error: %v", err)
 		}
 
@@ -220,6 +223,248 @@ func TestStoreQueryHidesRemovedDocumentsUnlessStatusIsExplicit(t *testing.T) {
 		deleted := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusDeleted))
 		if len(deleted) != 1 || deleted[0].ID != removed.ID {
 			t.Fatalf("expected explicit deleted query to return removed document %d, got %#v", removed.ID, deleted)
+		}
+	})
+}
+
+func TestStoreAddPageRejectsDuplicateIndex(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "duplicate-page-index",
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
+			t.Fatalf("first AddPage returned error: %v", err)
+		}
+
+		err = store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001-new.webp", ContentType: "image/webp", Size: 456})
+		if !errors.Is(err, ErrPageAlreadyExists{}) {
+			t.Fatalf("expected duplicate AddPage to fail with ErrPageAlreadyExists, got %v", err)
+		}
+
+		var duplicate ErrPageAlreadyExists
+		if !errors.As(err, &duplicate) {
+			t.Fatalf("expected duplicate AddPage error to unwrap as ErrPageAlreadyExists, got %T", err)
+		}
+		if duplicate.DocumentID != doc.ID || duplicate.PageIndex != 0 {
+			t.Fatalf("unexpected duplicate AddPage error payload: %#v", duplicate)
+		}
+	})
+}
+
+func TestStoreCreateAfterPurgeReturnsExistingDocument(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		first, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "query-purged",
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if _, err := store.Delete(ctx, first.ID); err != nil {
+			t.Fatalf("Remove returned error: %v", err)
+		}
+		if _, err := store.Purge(ctx, first.ID); err != nil {
+			t.Fatalf("Purge returned error: %v", err)
+		}
+
+		second, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "query-purged",
+		})
+		if !errors.Is(err, ErrAlreadyExists) {
+			t.Fatalf("expected duplicate Create after purge to return ErrAlreadyExists, got %v", err)
+		}
+		if second.ID != first.ID {
+			t.Fatalf("expected duplicate Create after purge to return existing ID %d, got %d", first.ID, second.ID)
+		}
+		if second.Status() != StatusPurged {
+			t.Fatalf("expected duplicate Create after purge to return purged document, got %s", second.Status())
+		}
+	})
+}
+
+func TestStoreTransitionToPurgedRejectsDocumentsWithPagesOrProgress(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "purge-guard",
+			Progress: Progress{
+				Total: 1,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
+			t.Fatalf("AddPage returned error: %v", err)
+		}
+		if _, err := store.Delete(ctx, doc.ID); err != nil {
+			t.Fatalf("Delete returned error: %v", err)
+		}
+		if err := store.TransitionTo(ctx, doc.ID, StatusPurged); err == nil {
+			t.Fatalf("expected TransitionTo(StatusPurged) to reject documents with pages/progress")
+		}
+	})
+}
+
+func TestStorePurgeClearsPagesAndProgress(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "purge-clears-pages",
+			Progress: Progress{
+				Total: 2,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
+			t.Fatalf("AddPage(0) returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 2, Key: "documents/1/pages/000003.webp", ContentType: "image/webp", Size: 789}); err != nil {
+			t.Fatalf("AddPage(2) returned error: %v", err)
+		}
+		if _, err := store.Delete(ctx, doc.ID); err != nil {
+			t.Fatalf("Delete returned error: %v", err)
+		}
+
+		removedPages, err := store.Purge(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("Purge returned error: %v", err)
+		}
+		if removedPages != 2 {
+			t.Fatalf("expected Purge to remove 2 pages, got %d", removedPages)
+		}
+
+		purged := queryDocuments(t, store, QueryBuilder{}.ByStatus(StatusPurged))
+		if len(purged) != 1 || purged[0].ID != doc.ID {
+			t.Fatalf("expected purged query to return document %d, got %#v", doc.ID, purged)
+		}
+		if purged[0].Progress.Done != 0 || purged[0].Progress.Total != 0 {
+			t.Fatalf("expected Purge to clear progress, got %#v", purged[0].Progress)
+		}
+		if countExistingPages(purged[0].Pages) != 0 {
+			t.Fatalf("expected Purge to clear persisted pages, got %#v", purged[0].Pages)
+		}
+	})
+}
+
+func TestStoreRestoreMakesDeletedDocumentVisibleAgain(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "restore-deleted",
+			Progress: Progress{
+				Total: 1,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
+			t.Fatalf("AddPage returned error: %v", err)
+		}
+		if _, err := store.Delete(ctx, doc.ID); err != nil {
+			t.Fatalf("Delete returned error: %v", err)
+		}
+
+		restored, err := store.Restore(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("Restore returned error: %v", err)
+		}
+		if restored.Status() != StatusQueued {
+			t.Fatalf("expected Restore to move deleted document to queued, got %s", restored.Status())
+		}
+		if restored.Progress.Done != 1 || restored.Progress.Total != 1 {
+			t.Fatalf("expected Restore to preserve deleted document progress, got %#v", restored.Progress)
+		}
+		if countExistingPages(restored.Pages) != 1 {
+			t.Fatalf("expected Restore to preserve deleted document pages, got %#v", restored.Pages)
+		}
+
+		got, err := store.Get(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("Get after Restore returned error: %v", err)
+		}
+		if got.Status() != StatusQueued {
+			t.Fatalf("expected restored document to be visible and queued, got %s", got.Status())
+		}
+	})
+}
+
+func TestStoreRestoreMakesPurgedDocumentVisibleAgain(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "restore-purged",
+			Progress: Progress{
+				Total: 2,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
+			t.Fatalf("AddPage returned error: %v", err)
+		}
+		if _, err := store.Delete(ctx, doc.ID); err != nil {
+			t.Fatalf("Delete returned error: %v", err)
+		}
+		if _, err := store.Purge(ctx, doc.ID); err != nil {
+			t.Fatalf("Purge returned error: %v", err)
+		}
+
+		restored, err := store.Restore(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("Restore returned error: %v", err)
+		}
+		if restored.Status() != StatusQueued {
+			t.Fatalf("expected Restore to move purged document to queued, got %s", restored.Status())
+		}
+		if restored.Progress.Done != 0 || restored.Progress.Total != 0 {
+			t.Fatalf("expected Restore to preserve purged zeroed progress, got %#v", restored.Progress)
+		}
+		if countExistingPages(restored.Pages) != 0 {
+			t.Fatalf("expected Restore to keep purged document pages empty, got %#v", restored.Pages)
+		}
+	})
+}
+
+func TestStoreRestoreRejectsVisibleDocument(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "restore-visible",
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+
+		err = func() error {
+			_, err := store.Restore(ctx, doc.ID)
+			return err
+		}()
+		if !errors.Is(err, ErrInvalidStatusTransition{To: StatusQueued}) {
+			t.Fatalf("expected Restore on visible document to fail with ErrInvalidStatusTransition, got %v", err)
 		}
 	})
 }
@@ -329,7 +574,7 @@ func TestMemoryStoreAddAndRemovePageLikeSQLite(t *testing.T) {
 	if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001.webp", ContentType: "image/webp", Size: 123}); err != nil {
 		t.Fatalf("AddPage(0) returned error: %v", err)
 	}
-	if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001-new.webp", ContentType: "image/webp", Size: 456}); !errors.Is(err, ErrPageAlreadyExists) {
+	if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/1/pages/000001-new.webp", ContentType: "image/webp", Size: 456}); !errors.Is(err, ErrPageAlreadyExists{}) {
 		t.Fatalf("expected duplicate AddPage to fail with ErrPageAlreadyExists, got %v", err)
 	}
 	if err := store.AddPage(ctx, doc.ID, Page{Index: 2, Key: "documents/1/pages/000003.webp", ContentType: "image/webp", Size: 789}); err != nil {

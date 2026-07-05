@@ -79,7 +79,6 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 	document := documents.Document{
 		Source:           input.Source,
 		SourceDocumentID: input.SourceDocumentID,
-		SourceMeta:       input.SourceMeta,
 		StorageBackend:   storageBackend,
 	}
 	return a.documents.Create(ctx, document)
@@ -173,6 +172,8 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 			document.Progress.Done = 0
 			return nil
 		})
+	case documents.Restore:
+		document, err = a.documents.Restore(ctx, id)
 	default:
 		return documents.Document{}, fmt.Errorf("invalid refresh mode: %s", mode)
 	}
@@ -180,7 +181,7 @@ func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.Refres
 }
 
 func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, error) {
-	return a.documents.Remove(ctx, id)
+	return a.documents.Delete(ctx, id)
 }
 
 func (a *App) RunWorker(ctx context.Context) {
