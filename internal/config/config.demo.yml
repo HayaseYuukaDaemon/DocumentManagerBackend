@@ -4,6 +4,7 @@ log_level: "info"
 default_storage: "memory"
 document_store: "sqlite"
 sqlite_path: "document-archive.db"
+deleted_sweep_interval: "24h"
 allow_cors: []
 s3:
   endpoint: ""

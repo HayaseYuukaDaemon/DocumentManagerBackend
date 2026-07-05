@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"document-archive/internal/storage"
 )
@@ -33,6 +34,9 @@ func TestLoadUsesDefaultsWithoutConfigFile(t *testing.T) {
 	if cfg.SQLitePath != "document-archive.db" {
 		t.Fatalf("unexpected sqlite path: %q", cfg.SQLitePath)
 	}
+	if cfg.DeletedSweepInterval != 24*time.Hour {
+		t.Fatalf("unexpected deleted sweep interval: %v", cfg.DeletedSweepInterval)
+	}
 	if len(cfg.AllowCORS) != 0 {
 		t.Fatalf("allow_cors should default to empty, got %#v", cfg.AllowCORS)
 	}
@@ -50,6 +54,7 @@ log_level: "debug"
 default_storage: "s3"
 document_store: "memory"
 sqlite_path: "/tmp/archive.db"
+deleted_sweep_interval: "12h"
 allow_cors:
   - "http://localhost:5173"
   - "https://example.com"
@@ -85,6 +90,9 @@ s3:
 	}
 	if cfg.SQLitePath != "/tmp/archive.db" {
 		t.Fatalf("unexpected sqlite path: %q", cfg.SQLitePath)
+	}
+	if cfg.DeletedSweepInterval != 12*time.Hour {
+		t.Fatalf("unexpected deleted sweep interval: %v", cfg.DeletedSweepInterval)
 	}
 	if !slices.Equal(cfg.AllowCORS, []string{"http://localhost:5173", "https://example.com"}) {
 		t.Fatalf("unexpected allow_cors: %#v", cfg.AllowCORS)
@@ -130,6 +138,16 @@ func TestLoadReturnsErrorForInvalidConfigYAML(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("Load should return error for invalid config.yml")
+	}
+}
+
+func TestLoadReturnsErrorForInvalidDeletedSweepInterval(t *testing.T) {
+	dir := chdirTemp(t)
+	writeConfigFile(t, dir, "deleted_sweep_interval: invalid")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load should return error for invalid deleted_sweep_interval")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,7 @@ type Config struct {
 	DefaultStorageBackend storage.StorageName
 	DocumentStore         string
 	SQLitePath            string
+	DeletedSweepInterval  time.Duration
 	AllowCORS             []string
 	S3Endpoint            string
 	S3Bucket              string
@@ -38,6 +40,7 @@ type fileConfig struct {
 	DefaultStorageBackend *string      `yaml:"default_storage"`
 	DocumentStore         *string      `yaml:"document_store"`
 	SQLitePath            *string      `yaml:"sqlite_path"`
+	DeletedSweepInterval  *string      `yaml:"deleted_sweep_interval"`
 	AllowCORS             []string     `yaml:"allow_cors"`
 	S3                    fileS3Config `yaml:"s3"`
 }
@@ -63,7 +66,9 @@ func load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	applyFileConfig(&cfg, fileCfg)
+	if err := applyFileConfig(&cfg, fileCfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
@@ -74,6 +79,7 @@ func defaultConfig() Config {
 		DefaultStorageBackend: storage.MemoryStorageName,
 		DocumentStore:         "sqlite",
 		SQLitePath:            "document-archive.db",
+		DeletedSweepInterval:  24 * time.Hour,
 	}
 }
 
@@ -95,7 +101,7 @@ func readFileConfig(path string) (fileConfig, error) {
 	return cfg, nil
 }
 
-func applyFileConfig(cfg *Config, fileCfg fileConfig) {
+func applyFileConfig(cfg *Config, fileCfg fileConfig) error {
 	if fileCfg.Addr != nil {
 		cfg.Addr = *fileCfg.Addr
 	}
@@ -113,6 +119,13 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.SQLitePath != nil {
 		cfg.SQLitePath = *fileCfg.SQLitePath
+	}
+	if fileCfg.DeletedSweepInterval != nil {
+		interval, err := parseDuration(*fileCfg.DeletedSweepInterval)
+		if err != nil {
+			return fmt.Errorf("parse deleted_sweep_interval: %w", err)
+		}
+		cfg.DeletedSweepInterval = interval
 	}
 	if fileCfg.AllowCORS != nil {
 		cfg.AllowCORS = append([]string(nil), fileCfg.AllowCORS...)
@@ -138,6 +151,7 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	if fileCfg.S3.UsePathStyle != nil {
 		cfg.S3UsePathStyle = *fileCfg.S3.UsePathStyle
 	}
+	return nil
 }
 
 func parseStorageName(raw string) storage.StorageName {
@@ -155,4 +169,15 @@ func parseLogLevel(raw string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+func parseDuration(raw string) (time.Duration, error) {
+	value, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, errors.New("duration must not be negative")
+	}
+	return value, nil
 }

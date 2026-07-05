@@ -38,7 +38,7 @@ func main() {
 	}
 	defer closeDocumentStore()
 
-	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend)
+	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend, cfg.DeletedSweepInterval)
 	err = archiveApp.RegisterSource(hitomi.NewHandler())
 	if err != nil {
 		logger.Error("failed to register source", "error", err)

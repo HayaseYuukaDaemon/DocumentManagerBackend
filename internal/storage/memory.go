@@ -38,6 +38,20 @@ func (s *MemoryStore) StorageName() StorageName {
 	return s.storageName
 }
 
+func (s *MemoryStore) DeleteObject(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[key]; !ok {
+		return ErrObjectNotFound
+	}
+	delete(s.objects, key)
+	return nil
+}
+
 func (s *MemoryStore) PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err

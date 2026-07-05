@@ -33,5 +33,6 @@ type ObjectStore interface {
 	PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error)
 	GetObject(ctx context.Context, key string) (Object, error)
 	HeadObject(ctx context.Context, key string) (ObjectInfo, error)
+	DeleteObject(ctx context.Context, key string) error
 	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)
 }

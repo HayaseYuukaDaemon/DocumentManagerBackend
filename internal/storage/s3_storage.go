@@ -76,6 +76,23 @@ func (s *S3Store) StorageName() StorageName {
 	return s.storageName
 }
 
+func (s *S3Store) DeleteObject(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if key == "" {
+		return errors.New("object key is required")
+	}
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return normalizeS3Error(err)
+	}
+	return nil
+}
+
 func (s *S3Store) PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err

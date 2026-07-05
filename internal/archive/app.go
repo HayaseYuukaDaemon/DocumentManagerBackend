@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"document-archive/internal/documents"
@@ -14,20 +15,23 @@ import (
 )
 
 const pagePresignTTL = 24 * time.Hour
+const deletedPurgeBatchSize = 5
 
 type App struct {
 	documents      documents.Store
 	storages       map[storage.StorageName]storage.ObjectStore
 	defaultStorage storage.StorageName
+	deletedSweep   time.Duration
 	sources        map[sources.SourceType]SourceHandler
 	logger         *slog.Logger
 }
 
-func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage storage.StorageName) *App {
+func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage storage.StorageName, deletedSweep time.Duration) *App {
 	return &App{
 		documents:      documentStore,
 		storages:       make(map[storage.StorageName]storage.ObjectStore),
 		defaultStorage: defaultStorage,
+		deletedSweep:   deletedSweep,
 		sources:        make(map[sources.SourceType]SourceHandler),
 		logger:         logger,
 	}
@@ -185,17 +189,96 @@ func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, e
 }
 
 func (a *App) RunWorker(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	queuedTicker := time.NewTicker(time.Second)
+	defer queuedTicker.Stop()
+
+	var deletedTicker *time.Ticker
+	var deletedCh <-chan time.Time
+	if a.deletedSweep > 0 {
+		deletedTicker = time.NewTicker(a.deletedSweep)
+		defer deletedTicker.Stop()
+		deletedCh = deletedTicker.C
+	}
+
+	a.processDeleted(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-queuedTicker.C:
 			a.processQueued(ctx)
+		case <-deletedCh:
+			a.processDeleted(ctx)
 		}
 	}
+}
+
+func (a *App) processDeleted(ctx context.Context) {
+	for {
+		qb := documents.QueryBuilder{}
+		query, err := qb.ByStatus(documents.StatusDeleted).Limit(deletedPurgeBatchSize).Build()
+		if err != nil {
+			a.logger.Error("build deleted documents query failed", "error", err)
+			return
+		}
+		deleted, err := a.documents.Query(ctx, query)
+		if err != nil {
+			a.logger.Error("list deleted documents failed", "error", err)
+			return
+		}
+		if len(deleted) == 0 {
+			return
+		}
+
+		purgedCount := 0
+		for _, document := range deleted {
+			a.logger.Info("purging document archive", "document_id", document.ID)
+			storageBackend, err := a.getStorage(document.StorageBackend)
+			if err != nil {
+				a.logger.Warn("get storage backend failed", "document_id", document.ID, "error", err)
+				continue
+			}
+
+			purgeReady := true
+			for _, page := range document.Pages {
+				if page.Key == "" {
+					continue
+				}
+				if err := a.deleteObjectForPurge(ctx, storageBackend, page.Key); err != nil {
+					a.logger.Warn("delete page object failed", "document_id", document.ID, "page_index", page.Index, "error", err)
+					purgeReady = false
+				}
+			}
+			manifestKey := ManifestObjectKey(strconv.Itoa(document.ID))
+			if err := a.deleteObjectForPurge(ctx, storageBackend, manifestKey); err != nil {
+				a.logger.Warn("delete manifest object failed", "document_id", document.ID, "error", err)
+				purgeReady = false
+			}
+			if !purgeReady {
+				a.logger.Warn("purge document skipped because object deletion did not complete", "document_id", document.ID)
+				continue
+			}
+			if _, err := a.documents.Purge(ctx, document.ID); err != nil {
+				a.logger.Warn("purge document failed", "document_id", document.ID, "error", err)
+			} else {
+				purgedCount++
+				a.logger.Info("document archive removed", "document_id", document.ID)
+			}
+		}
+
+		if len(deleted) < deletedPurgeBatchSize || purgedCount == 0 {
+			return
+		}
+	}
+}
+
+func (a *App) deleteObjectForPurge(ctx context.Context, store storage.ObjectStore, key string) error {
+	err := store.DeleteObject(ctx, key)
+	if err == nil || errors.Is(err, storage.ErrObjectNotFound) {
+		return nil
+	}
+	return err
 }
 
 func (a *App) processQueued(ctx context.Context) {
