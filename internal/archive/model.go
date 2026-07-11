@@ -2,7 +2,6 @@ package archive
 
 import (
 	"context"
-	"encoding/json"
 
 	"document-archive/internal/documents"
 	"document-archive/internal/sources"
@@ -10,15 +9,6 @@ import (
 )
 
 type SourceName string
-
-type Manifest struct {
-	SchemaVersion    int                `json:"schema_version"`
-	Source           sources.SourceType `json:"source"`
-	SourceMeta       json.RawMessage    `json:"source_meta,omitempty"`
-	SourceDocumentID string             `json:"source_document_id"`
-	Title            string             `json:"title,omitempty"`
-	Pages            []documents.Page   `json:"pages"`
-}
 
 type PageResultKind string
 
@@ -35,7 +25,8 @@ type PageResult struct {
 
 type SourceHandler interface {
 	Source() sources.SourceType
+	ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error)
 	ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error)
-	ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) (Manifest, error)
+	ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error
 	RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error
 }

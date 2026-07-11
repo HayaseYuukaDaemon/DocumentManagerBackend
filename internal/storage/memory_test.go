@@ -89,3 +89,38 @@ func TestMemoryStoreHeadMissingObject(t *testing.T) {
 		t.Fatalf("expected ErrObjectNotFound, got %v", err)
 	}
 }
+
+func TestMemoryStoreDeletePrefix(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for _, key := range []string{
+		"documents/1/pages/hash-a",
+		"documents/1/pages/hash-b",
+		"documents/1/manifest.json",
+		"documents/10/pages/hash-c",
+	} {
+		if _, err := store.PutObject(ctx, ObjectInfo{Key: key, Size: 1}, strings.NewReader("x")); err != nil {
+			t.Fatalf("PutObject(%q) returned error: %v", key, err)
+		}
+	}
+
+	if err := store.DeletePrefix(ctx, "documents/1/"); err != nil {
+		t.Fatalf("DeletePrefix returned error: %v", err)
+	}
+	for _, key := range []string{
+		"documents/1/pages/hash-a",
+		"documents/1/pages/hash-b",
+		"documents/1/manifest.json",
+	} {
+		if _, err := store.HeadObject(ctx, key); !errors.Is(err, ErrObjectNotFound) {
+			t.Fatalf("expected %q to be deleted, got %v", key, err)
+		}
+	}
+	if _, err := store.HeadObject(ctx, "documents/10/pages/hash-c"); err != nil {
+		t.Fatalf("DeletePrefix removed sibling prefix object: %v", err)
+	}
+	if err := store.DeletePrefix(ctx, "documents/1/"); err != nil {
+		t.Fatalf("DeletePrefix should be idempotent, got %v", err)
+	}
+}

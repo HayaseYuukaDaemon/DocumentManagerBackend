@@ -159,29 +159,22 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 }
 
 func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.RefreshMode) (documents.Document, error) {
-	var err error
-	var document documents.Document
 	switch mode {
 	case documents.OnlyMetaData:
-		document, err = a.documents.Get(ctx, id)
-		if err != nil {
+		if err := a.documents.TransitionTo(ctx, id, documents.StatusQueued); err != nil {
 			return documents.Document{}, err
 		}
-		err = a.documents.TransitionTo(ctx, id, documents.StatusQueued)
+		return a.documents.Get(ctx, id)
 	case documents.All:
 		if err := a.documents.TransitionTo(ctx, id, documents.StatusQueued); err != nil {
 			return documents.Document{}, err
 		}
-		document, err = a.documents.UpdateMeta(ctx, id, func(document *documents.DocumentMeta) error {
-			document.Progress.Done = 0
-			return nil
-		})
+		return a.documents.ResetPages(ctx, id)
 	case documents.Restore:
-		document, err = a.documents.Restore(ctx, id)
+		return a.documents.Restore(ctx, id)
 	default:
 		return documents.Document{}, fmt.Errorf("invalid refresh mode: %s", mode)
 	}
-	return document, err
 }
 
 func (a *App) RemoveDocument(ctx context.Context, id int) (documents.Document, error) {
@@ -240,24 +233,13 @@ func (a *App) processDeleted(ctx context.Context) {
 				continue
 			}
 
-			purgeReady := true
-			for _, page := range document.Pages {
-				if page.Key == "" {
+			prefix := DocumentObjectPrefix(strconv.Itoa(document.ID))
+			if err := storageBackend.DeletePrefix(ctx, prefix); err != nil {
+				if !errors.Is(err, storage.ErrObjectNotFound) {
+					a.logger.Warn("delete document objects failed", "document_id", document.ID, "prefix", prefix, "error", err)
+					a.logger.Warn("purge document skipped because object deletion did not complete", "document_id", document.ID)
 					continue
 				}
-				if err := a.deleteObjectForPurge(ctx, storageBackend, page.Key); err != nil {
-					a.logger.Warn("delete page object failed", "document_id", document.ID, "page_index", page.Index, "error", err)
-					purgeReady = false
-				}
-			}
-			manifestKey := ManifestObjectKey(strconv.Itoa(document.ID))
-			if err := a.deleteObjectForPurge(ctx, storageBackend, manifestKey); err != nil {
-				a.logger.Warn("delete manifest object failed", "document_id", document.ID, "error", err)
-				purgeReady = false
-			}
-			if !purgeReady {
-				a.logger.Warn("purge document skipped because object deletion did not complete", "document_id", document.ID)
-				continue
 			}
 			if _, err := a.documents.Purge(ctx, document.ID); err != nil {
 				a.logger.Warn("purge document failed", "document_id", document.ID, "error", err)
@@ -271,14 +253,6 @@ func (a *App) processDeleted(ctx context.Context) {
 			return
 		}
 	}
-}
-
-func (a *App) deleteObjectForPurge(ctx context.Context, store storage.ObjectStore, key string) error {
-	err := store.DeleteObject(ctx, key)
-	if err == nil || errors.Is(err, storage.ErrObjectNotFound) {
-		return nil
-	}
-	return err
 }
 
 func (a *App) processQueued(ctx context.Context) {
@@ -323,52 +297,48 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	if err != nil {
 		return a.failDocument(ctx, id, err)
 	}
-	manifest, err := handler.ArchiveManifest(ctx, document, objectStorage)
+	resolved, err := handler.ResolveDocument(ctx, document)
+	if err != nil {
+		return a.failDocument(ctx, id, err)
+	}
+	document, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
+		d.SourceMeta = resolved.SourceMeta
+		d.Title = resolved.Title
+		if resolved.Pages != nil {
+			d.Progress.Total = len(resolved.Pages)
+		}
+		d.Error = ""
+		return nil
+	})
 	if err != nil {
 		return a.failDocument(ctx, id, err)
 	}
 
-	if document.Progress.Done == 0 {
-		if err := a.documents.TransitionTo(ctx, id, documents.StatusDownloading); err != nil {
+	if document.Progress.Done < document.Progress.Total {
+		document, err = a.documents.ResetPages(ctx, id)
+		if err != nil {
 			return a.failDocument(ctx, id, err)
 		}
-		document, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
-			d.SourceMeta = manifest.SourceMeta
-			if len(manifest.Pages) > 0 {
-				d.Progress.Total = len(manifest.Pages)
-			}
-			return nil
-		})
-		if err != nil {
+		if err := a.documents.TransitionTo(ctx, id, documents.StatusDownloading); err != nil {
 			return a.failDocument(ctx, id, err)
 		}
 		_, err = handler.ArchiveContent(ctx, document, objectStorage)
 		if err != nil {
 			return a.failDocument(ctx, id, err)
 		}
-		_, err := handler.ArchiveManifest(ctx, document, objectStorage)
-		if err != nil {
-			return a.failDocument(ctx, id, err)
-		}
 	}
 
-	_, err = a.documents.UpdateMeta(ctx, id, func(d *documents.DocumentMeta) error {
-		if manifest.Title != "" {
-			d.Title = manifest.Title
-		}
-		if len(manifest.Pages) > 0 {
-			d.Progress.Total = len(manifest.Pages)
-		}
-		d.Error = ""
-		return nil
-	})
+	document, err = a.documents.Get(ctx, id)
 	if err != nil {
-		return a.failDocument(ctx, document.ID, err)
+		return a.failDocument(ctx, id, err)
+	}
+	if err := handler.ArchiveManifest(ctx, document, objectStorage); err != nil {
+		return a.failDocument(ctx, id, err)
 	}
 	if err := a.documents.TransitionTo(ctx, id, documents.StatusArchived); err != nil {
 		return a.failDocument(ctx, id, err)
 	}
-	return document, nil
+	return a.documents.Get(ctx, id)
 }
 
 func (a *App) getSource(source sources.SourceType) (SourceHandler, error) {

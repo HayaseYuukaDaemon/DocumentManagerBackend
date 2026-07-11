@@ -7,7 +7,7 @@
 # Local env/config
 .env
 *.local
-config.yaml
+config.yml
 
 # Local SQLite data
 *.db

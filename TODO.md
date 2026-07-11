@@ -2,14 +2,6 @@
 
 ## 近期目标
 
-- 添加定期扫描状态为`deleted`的文档的功能 
-  - 间隔可配置, 默认1d
-  - 检索代码, 看看是否能确保`deleted`的文档不会隐式出现在任何外部API
-  - 如有可能, 看看能不能直接在数据库层面屏蔽这种
-  - 触发扫描任务后, 从数据库中检索所有`deleted`的文档, 从后端OSS中移除对应的文件和manifest, 将状态标记为`purged`
-  - 程序启动时, 扫描数据库, 如有待删除则执行
-  - 特别注意这个删除的语义, 程序中很容易忘记要处理已删除的情况, 最好是能从数据库层面约束, 再不济也要尽量把问题约束在编译期
-
 ### 实现nhentai handler
 
 ### 实现jmcomic handler
@@ -23,7 +15,7 @@
   - 此时程序需要进入不一致性恢复状态, 具体如何恢复, 以后再探讨吧
 
 - 梳理 `Progress.Done` / `Progress.Total` 的所有权。
-  - 当前 `Done` 逐步改为由 store 的 `AddPage` / `RemovePage` 维护，但 `UpdateMeta` 仍可修改完整 `Progress`。
+  - 当前 `Done` 由 store 的 `AddPage` / `RemovePage` / `ResetPages` / `Purge` 维护，但 `UpdateMeta` 仍可修改完整 `Progress`。
   - 后续考虑收窄 meta 更新能力，或者提供更明确的 progress reset/update API。
 
 - 实现数据库版本管理与迁移

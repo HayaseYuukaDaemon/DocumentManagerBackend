@@ -575,6 +575,41 @@ func (s *SQLiteStore) Restore(ctx context.Context, id int) (Document, error) {
 	return document, nil
 }
 
+func (s *SQLiteStore) ResetPages(ctx context.Context, id int) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return Document{}, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Document{}, err
+	}
+	defer rollback(tx)
+
+	document, err := getTx(ctx, tx, id, true)
+	if err != nil {
+		return Document{}, err
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM document_pages WHERE document_id = ?`, id)
+	if err != nil {
+		return Document{}, err
+	}
+	document, err = s.updateMeta(ctx, id, func(meta *DocumentMeta) error {
+		meta.Progress.Done = 0
+		return nil
+	}, tx)
+	if err != nil {
+		return Document{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Document{}, err
+	}
+	document.Pages = nil
+	return document, nil
+}
+
 func getTx(ctx context.Context, tx *sql.Tx, id int, visibleOnly bool) (Document, error) {
 	query := `SELECT
 		id, source, source_document_id, source_meta, title, storage_backend, document_status,

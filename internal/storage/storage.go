@@ -34,5 +34,6 @@ type ObjectStore interface {
 	GetObject(ctx context.Context, key string) (Object, error)
 	HeadObject(ctx context.Context, key string) (ObjectInfo, error)
 	DeleteObject(ctx context.Context, key string) error
+	DeletePrefix(ctx context.Context, prefix string) error
 	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)
 }

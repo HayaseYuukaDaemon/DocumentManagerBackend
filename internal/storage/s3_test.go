@@ -123,6 +123,34 @@ func TestS3StoreHeadMissingObject(t *testing.T) {
 	}
 }
 
+func TestS3StoreDeletePrefix(t *testing.T) {
+	store := newLocalS3TestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	base := fmt.Sprintf("storage-test/%d", time.Now().UnixNano())
+	prefix := base + "/document/"
+	sibling := base + "/document-sibling/page"
+	defer deleteS3TestObject(t, store, sibling)
+	for _, key := range []string{prefix + "pages/hash-a", prefix + "manifest.json", sibling} {
+		if _, err := store.PutObject(ctx, ObjectInfo{Key: key, Size: 1}, bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("PutObject(%q) returned error: %v", key, err)
+		}
+	}
+
+	if err := store.DeletePrefix(ctx, prefix); err != nil {
+		t.Fatalf("DeletePrefix returned error: %v", err)
+	}
+	for _, key := range []string{prefix + "pages/hash-a", prefix + "manifest.json"} {
+		if _, err := store.HeadObject(ctx, key); !errors.Is(err, ErrObjectNotFound) {
+			t.Fatalf("expected %q to be deleted, got %v", key, err)
+		}
+	}
+	if _, err := store.HeadObject(ctx, sibling); err != nil {
+		t.Fatalf("DeletePrefix removed sibling object: %v", err)
+	}
+}
+
 func TestObjectETagComputesMD5AndRewinds(t *testing.T) {
 	body := []byte("page")
 	reader := bytes.NewReader(body)

@@ -93,6 +93,39 @@ func (s *S3Store) DeleteObject(ctx context.Context, key string) error {
 	return nil
 }
 
+func (s *S3Store) DeletePrefix(ctx context.Context, prefix string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return errors.New("object prefix is required")
+	}
+
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	keys := make([]string, 0)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return normalizeS3Error(err)
+		}
+		for _, object := range page.Contents {
+			if key := aws.ToString(object.Key); key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	for _, key := range keys {
+		if err := s.DeleteObject(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *S3Store) PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err

@@ -152,6 +152,7 @@ type Store interface {
 	Delete(ctx context.Context, id int) (Document, error)
 	Purge(ctx context.Context, id int) (int, error)
 	Restore(ctx context.Context, id int) (Document, error)
+	ResetPages(ctx context.Context, id int) (Document, error)
 	UpdateMeta(ctx context.Context, id int, fn func(*DocumentMeta) error) (Document, error)
 	TransitionTo(ctx context.Context, id int, newStatus DocumentStatus) error
 	AddPage(ctx context.Context, id int, page Page) error
@@ -390,6 +391,28 @@ func (s *MemoryStore) Restore(ctx context.Context, id int) (Document, error) {
 	default:
 		return Document{}, ErrInvalidStatusTransition{From: document.status, To: StatusQueued}
 	}
+}
+
+func (s *MemoryStore) ResetPages(ctx context.Context, id int) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return Document{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 0 || id >= len(s.idMap) {
+		return Document{}, ErrNotFound
+	}
+
+	document := &s.idMap[id]
+	if !isVisibleDocumentStatus(document.status) {
+		return Document{}, ErrNotFound
+	}
+
+	document.Pages = nil
+	document.Progress.Done = 0
+	document.UpdatedAt = time.Now().UTC()
+	return *document, nil
 }
 
 func (s *MemoryStore) AddPage(ctx context.Context, id int, page Page) error {

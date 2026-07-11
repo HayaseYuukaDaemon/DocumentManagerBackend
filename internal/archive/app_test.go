@@ -2,10 +2,12 @@ package archive
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,9 +20,79 @@ const testStorageBackend storage.StorageName = "test-storage"
 const testSourceType sources.SourceType = "test-source"
 
 type fakeObjectStore struct {
-	name    storage.StorageName
-	deleted []string
-	fail    map[string]error
+	name            storage.StorageName
+	deletedPrefixes []string
+	failPrefixes    map[string]error
+}
+
+type fakeSourceHandler struct {
+	resolved         documents.Document
+	downloads        int
+	pageDownloadHook func(ctx context.Context, documentID int, page documents.Page) error
+}
+
+func (h *fakeSourceHandler) Source() sources.SourceType {
+	return testSourceType
+}
+
+func (h *fakeSourceHandler) ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
+	return h.resolved, nil
+}
+
+func (h *fakeSourceHandler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
+	pages := make([]documents.Page, 0, len(h.resolved.Pages))
+	for index, resolvedPage := range h.resolved.Pages {
+		key, err := PageObjectKey(strconv.Itoa(document.ID), resolvedPage.Hash)
+		if err != nil {
+			return pages, err
+		}
+		info, err := objects.HeadObject(ctx, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			h.downloads++
+			body := "page-" + resolvedPage.Hash
+			info, err = objects.PutObject(ctx, storage.ObjectInfo{
+				Key:         key,
+				Size:        int64(len(body)),
+				ContentType: resolvedPage.ContentType,
+				ETag:        resolvedPage.Hash,
+			}, strings.NewReader(body))
+		}
+		if err != nil {
+			return pages, err
+		}
+		page := documents.Page{
+			Index:       index,
+			Key:         key,
+			ContentType: resolvedPage.ContentType,
+			Size:        info.Size,
+			Hash:        resolvedPage.Hash,
+		}
+		if h.pageDownloadHook != nil {
+			if err := h.pageDownloadHook(ctx, document.ID, page); err != nil {
+				return pages, err
+			}
+		}
+		pages = append(pages, page)
+	}
+	return pages, nil
+}
+
+func (h *fakeSourceHandler) ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
+	body, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	_, err = objects.PutObject(ctx, storage.ObjectInfo{
+		Key:         ManifestObjectKey(strconv.Itoa(document.ID)),
+		Size:        int64(len(body)),
+		ContentType: "application/json",
+	}, strings.NewReader(string(body)))
+	return err
+}
+
+func (h *fakeSourceHandler) RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error {
+	h.pageDownloadHook = hook
+	return nil
 }
 
 func (s *fakeObjectStore) StorageName() storage.StorageName {
@@ -40,8 +112,12 @@ func (s *fakeObjectStore) HeadObject(ctx context.Context, key string) (storage.O
 }
 
 func (s *fakeObjectStore) DeleteObject(ctx context.Context, key string) error {
-	s.deleted = append(s.deleted, key)
-	if err, ok := s.fail[key]; ok {
+	return storage.ErrNotImplemented
+}
+
+func (s *fakeObjectStore) DeletePrefix(ctx context.Context, prefix string) error {
+	s.deletedPrefixes = append(s.deletedPrefixes, prefix)
+	if err, ok := s.failPrefixes[prefix]; ok {
 		return err
 	}
 	return nil
@@ -51,7 +127,7 @@ func (s *fakeObjectStore) PresignGetObject(ctx context.Context, key string, ttl 
 	return "", storage.ErrNotImplemented
 }
 
-func TestProcessDeletedPurgesDocumentAndDeletesManifest(t *testing.T) {
+func TestProcessDeletedPurgesDocumentAndDeletesObjectPrefix(t *testing.T) {
 	ctx := context.Background()
 	store := documents.NewMemoryStore()
 	app := NewApp(store, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
@@ -66,12 +142,10 @@ func TestProcessDeletedPurgesDocumentAndDeletesManifest(t *testing.T) {
 	if len(purged) != 1 || purged[0].ID != doc.ID {
 		t.Fatalf("expected document %d to be purged, got %#v", doc.ID, purged)
 	}
-	wantKeys := []string{
-		PageObjectKey(strconv.Itoa(doc.ID), 0, "image/webp"),
-		PageObjectKey(strconv.Itoa(doc.ID), 2, "image/webp"),
-		ManifestObjectKey(strconv.Itoa(doc.ID)),
+	wantPrefix := DocumentObjectPrefix(strconv.Itoa(doc.ID))
+	if len(objects.deletedPrefixes) != 1 || objects.deletedPrefixes[0] != wantPrefix {
+		t.Fatalf("expected deleted prefix %q, got %#v", wantPrefix, objects.deletedPrefixes)
 	}
-	assertDeletedKeys(t, objects.deleted, wantKeys)
 }
 
 func TestProcessDeletedLeavesDocumentDeletedWhenObjectDeletionFails(t *testing.T) {
@@ -80,10 +154,10 @@ func TestProcessDeletedLeavesDocumentDeletedWhenObjectDeletionFails(t *testing.T
 	app := NewApp(store, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
 
 	doc := createDeletedDocumentForPurge(t, ctx, store)
-	pageKey := PageObjectKey(strconv.Itoa(doc.ID), 0, "image/webp")
+	prefix := DocumentObjectPrefix(strconv.Itoa(doc.ID))
 	objects := &fakeObjectStore{
-		name: testStorageBackend,
-		fail: map[string]error{pageKey: errors.New("delete failed")},
+		name:         testStorageBackend,
+		failPrefixes: map[string]error{prefix: errors.New("delete failed")},
 	}
 	app.RegisterStorage(objects)
 
@@ -105,14 +179,10 @@ func TestProcessDeletedTreatsMissingObjectsAsPurgeable(t *testing.T) {
 	app := NewApp(store, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
 
 	doc := createDeletedDocumentForPurge(t, ctx, store)
-	pageKey := PageObjectKey(strconv.Itoa(doc.ID), 0, "image/webp")
-	manifestKey := ManifestObjectKey(strconv.Itoa(doc.ID))
+	prefix := DocumentObjectPrefix(strconv.Itoa(doc.ID))
 	objects := &fakeObjectStore{
-		name: testStorageBackend,
-		fail: map[string]error{
-			pageKey:     storage.ErrObjectNotFound,
-			manifestKey: storage.ErrObjectNotFound,
-		},
+		name:         testStorageBackend,
+		failPrefixes: map[string]error{prefix: storage.ErrObjectNotFound},
 	}
 	app.RegisterStorage(objects)
 
@@ -121,6 +191,192 @@ func TestProcessDeletedTreatsMissingObjectsAsPurgeable(t *testing.T) {
 	purged := queryDocumentsByStatus(t, ctx, store, documents.StatusPurged)
 	if len(purged) != 1 || purged[0].ID != doc.ID {
 		t.Fatalf("expected missing objects to still allow purge for document %d, got %#v", doc.ID, purged)
+	}
+}
+
+func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.T) {
+	ctx := context.Background()
+	documentStore := documents.NewMemoryStore()
+	objects := storage.NewMemoryStore()
+	handler := &fakeSourceHandler{resolved: documents.Document{
+		SourceMeta: json.RawMessage(`{"source":"resolved"}`),
+		Title:      "resolved title",
+		Pages: []documents.Page{{
+			Index:       0,
+			ContentType: "image/webp",
+			Hash:        "hash-a",
+		}},
+	}}
+	app := NewApp(documentStore, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
+	if err := app.RegisterSource(handler); err != nil {
+		t.Fatalf("RegisterSource returned error: %v", err)
+	}
+	app.RegisterStorage(objects)
+
+	doc, err := app.RequestDocument(ctx, documents.RequestDocumentInput{
+		Source:           testSourceType,
+		SourceDocumentID: "source-1",
+	})
+	if err != nil {
+		t.Fatalf("RequestDocument returned error: %v", err)
+	}
+	archived, err := app.processDocument(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("processDocument returned error: %v", err)
+	}
+	if archived.Status() != documents.StatusArchived || archived.Progress.Done != 1 || archived.Progress.Total != 1 {
+		t.Fatalf("unexpected archived document: %#v", archived)
+	}
+	if len(archived.Pages) != 1 || archived.Pages[0].Hash != "hash-a" {
+		t.Fatalf("unexpected archived pages: %#v", archived.Pages)
+	}
+	if handler.downloads != 1 {
+		t.Fatalf("expected initial archive to download once, got %d", handler.downloads)
+	}
+
+	snapshot, err := objects.GetObject(ctx, ManifestObjectKey(strconv.Itoa(doc.ID)))
+	if err != nil {
+		t.Fatalf("GetObject(document snapshot) returned error: %v", err)
+	}
+	defer snapshot.Body.Close()
+	if snapshot.ContentType != "application/json" {
+		t.Fatalf("unexpected snapshot content type: %s", snapshot.ContentType)
+	}
+	var snapshotJSON struct {
+		Title    string             `json:"title"`
+		Progress documents.Progress `json:"progress"`
+		Pages    []documents.Page   `json:"pages"`
+	}
+	if err := json.NewDecoder(snapshot.Body).Decode(&snapshotJSON); err != nil {
+		t.Fatalf("decode document snapshot: %v", err)
+	}
+	if snapshotJSON.Title != "resolved title" || snapshotJSON.Progress.Done != 1 || len(snapshotJSON.Pages) != 1 {
+		t.Fatalf("unexpected document snapshot: %#v", snapshotJSON)
+	}
+
+	refreshed, err := app.RefreshDocument(ctx, doc.ID, documents.All)
+	if err != nil {
+		t.Fatalf("RefreshDocument(all) returned error: %v", err)
+	}
+	if refreshed.Status() != documents.StatusQueued || refreshed.Progress.Done != 0 || len(refreshed.Pages) != 0 {
+		t.Fatalf("full refresh should queue and clear pages: %#v", refreshed)
+	}
+	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a")
+	if err != nil {
+		t.Fatalf("PageObjectKey returned error: %v", err)
+	}
+	if _, err := objects.HeadObject(ctx, pageKey); err != nil {
+		t.Fatalf("full refresh should retain hash-addressed object: %v", err)
+	}
+
+	rearchived, err := app.processDocument(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("processDocument after refresh returned error: %v", err)
+	}
+	if handler.downloads != 1 {
+		t.Fatalf("refresh should reuse existing object, got %d total downloads", handler.downloads)
+	}
+	if rearchived.Progress.Done != 1 || len(rearchived.Pages) != 1 || rearchived.Pages[0].Key != pageKey {
+		t.Fatalf("refresh did not rebuild page metadata: %#v", rearchived)
+	}
+
+	orphanedHistoryKey, err := PageObjectKey(strconv.Itoa(doc.ID), "old-hash")
+	if err != nil {
+		t.Fatalf("PageObjectKey(old-hash) returned error: %v", err)
+	}
+	if _, err := objects.PutObject(ctx, storage.ObjectInfo{
+		Key:  orphanedHistoryKey,
+		Size: 3,
+		ETag: "old-hash",
+	}, strings.NewReader("old")); err != nil {
+		t.Fatalf("PutObject(old history) returned error: %v", err)
+	}
+	if _, err := app.RemoveDocument(ctx, doc.ID); err != nil {
+		t.Fatalf("RemoveDocument returned error: %v", err)
+	}
+	app.processDeleted(ctx)
+	for _, key := range []string{pageKey, orphanedHistoryKey, ManifestObjectKey(strconv.Itoa(doc.ID))} {
+		if _, err := objects.HeadObject(ctx, key); !errors.Is(err, storage.ErrObjectNotFound) {
+			t.Fatalf("purge should delete object %q, got %v", key, err)
+		}
+	}
+	purged := queryDocumentsByStatus(t, ctx, documentStore, documents.StatusPurged)
+	if len(purged) != 1 || purged[0].ID != doc.ID {
+		t.Fatalf("expected document to be purged after prefix deletion, got %#v", purged)
+	}
+}
+
+func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
+	ctx := context.Background()
+	documentStore := documents.NewMemoryStore()
+	objects := storage.NewMemoryStore()
+	handler := &fakeSourceHandler{resolved: documents.Document{
+		SourceMeta: json.RawMessage(`{"source":"resolved"}`),
+		Title:      "resolved title",
+		Pages: []documents.Page{
+			{Index: 0, ContentType: "image/webp", Hash: "hash-a"},
+			{Index: 1, ContentType: "image/webp", Hash: "hash-b"},
+		},
+	}}
+	app := NewApp(documentStore, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
+	if err := app.RegisterSource(handler); err != nil {
+		t.Fatalf("RegisterSource returned error: %v", err)
+	}
+	app.RegisterStorage(objects)
+
+	doc, err := app.RequestDocument(ctx, documents.RequestDocumentInput{
+		Source:           testSourceType,
+		SourceDocumentID: "partial-source",
+	})
+	if err != nil {
+		t.Fatalf("RequestDocument returned error: %v", err)
+	}
+	if err := documentStore.TransitionTo(ctx, doc.ID, documents.StatusResolving); err != nil {
+		t.Fatalf("TransitionTo(resolving) returned error: %v", err)
+	}
+	if err := documentStore.TransitionTo(ctx, doc.ID, documents.StatusDownloading); err != nil {
+		t.Fatalf("TransitionTo(downloading) returned error: %v", err)
+	}
+	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a")
+	if err != nil {
+		t.Fatalf("PageObjectKey returned error: %v", err)
+	}
+	if _, err := objects.PutObject(ctx, storage.ObjectInfo{
+		Key:         pageKey,
+		Size:        6,
+		ContentType: "image/webp",
+		ETag:        "hash-a",
+	}, strings.NewReader("cached")); err != nil {
+		t.Fatalf("PutObject(cached page) returned error: %v", err)
+	}
+	if err := documentStore.AddPage(ctx, doc.ID, documents.Page{
+		Index:       0,
+		Key:         pageKey,
+		ContentType: "image/webp",
+		Size:        6,
+		Hash:        "hash-a",
+	}); err != nil {
+		t.Fatalf("AddPage(partial page) returned error: %v", err)
+	}
+	if err := documentStore.TransitionTo(ctx, doc.ID, documents.StatusFailed); err != nil {
+		t.Fatalf("TransitionTo(failed) returned error: %v", err)
+	}
+	if _, err := app.RefreshDocument(ctx, doc.ID, documents.OnlyMetaData); err != nil {
+		t.Fatalf("RefreshDocument(only_meta_data) returned error: %v", err)
+	}
+
+	archived, err := app.processDocument(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("processDocument returned error: %v", err)
+	}
+	if archived.Status() != documents.StatusArchived || archived.Progress.Done != 2 || archived.Progress.Total != 2 {
+		t.Fatalf("unexpected rebuilt document: %#v", archived)
+	}
+	if len(archived.Pages) != 2 || archived.Pages[0].Hash != "hash-a" || archived.Pages[1].Hash != "hash-b" {
+		t.Fatalf("unexpected rebuilt pages: %#v", archived.Pages)
+	}
+	if handler.downloads != 1 {
+		t.Fatalf("expected cached page reuse and one new download, got %d downloads", handler.downloads)
 	}
 }
 
@@ -138,17 +394,19 @@ func createDeletedDocumentForPurge(t *testing.T, ctx context.Context, store *doc
 	}
 	if err := store.AddPage(ctx, doc.ID, documents.Page{
 		Index:       0,
-		Key:         PageObjectKey(strconv.Itoa(doc.ID), 0, "image/webp"),
+		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-0"),
 		ContentType: "image/webp",
 		Size:        123,
+		Hash:        "hash-0",
 	}); err != nil {
 		t.Fatalf("AddPage(0) returned error: %v", err)
 	}
 	if err := store.AddPage(ctx, doc.ID, documents.Page{
 		Index:       2,
-		Key:         PageObjectKey(strconv.Itoa(doc.ID), 2, "image/webp"),
+		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-2"),
 		ContentType: "image/webp",
 		Size:        789,
+		Hash:        "hash-2",
 	}); err != nil {
 		t.Fatalf("AddPage(2) returned error: %v", err)
 	}
@@ -172,17 +430,13 @@ func queryDocumentsByStatus(t *testing.T, ctx context.Context, store documents.S
 	return result
 }
 
-func assertDeletedKeys(t *testing.T, got []string, want []string) {
+func mustPageObjectKey(t *testing.T, documentID string, hash string) string {
 	t.Helper()
-
-	if len(got) != len(want) {
-		t.Fatalf("unexpected deleted keys length: got=%v want=%v", got, want)
+	key, err := PageObjectKey(documentID, hash)
+	if err != nil {
+		t.Fatalf("PageObjectKey returned error: %v", err)
 	}
-	for index, key := range want {
-		if got[index] != key {
-			t.Fatalf("unexpected deleted key order/content at %d: got=%v want=%v", index, got, want)
-		}
-	}
+	return key
 }
 
 func discardLogger() *slog.Logger {

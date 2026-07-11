@@ -469,6 +469,89 @@ func TestStoreRestoreRejectsVisibleDocument(t *testing.T) {
 	})
 }
 
+func TestStoreResetPagesClearsPagesAndPreservesStatus(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "reset-pages",
+			Progress:         Progress{Total: 2},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		for index, hash := range []string{"hash-a", "hash-b"} {
+			if err := store.AddPage(ctx, doc.ID, Page{
+				Index:       index,
+				Key:         "documents/refresh/pages/" + hash,
+				ContentType: "image/webp",
+				Size:        123,
+				Hash:        hash,
+			}); err != nil {
+				t.Fatalf("AddPage(%d) returned error: %v", index, err)
+			}
+		}
+		if err := store.TransitionTo(ctx, doc.ID, StatusResolving); err != nil {
+			t.Fatalf("TransitionTo(resolving) returned error: %v", err)
+		}
+		if err := store.TransitionTo(ctx, doc.ID, StatusArchived); err != nil {
+			t.Fatalf("TransitionTo(archived) returned error: %v", err)
+		}
+
+		reset, err := store.ResetPages(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("ResetPages returned error: %v", err)
+		}
+		if reset.Status() != StatusArchived {
+			t.Fatalf("expected status to remain archived, got %s", reset.Status())
+		}
+		if len(reset.Pages) != 0 {
+			t.Fatalf("expected pages to be cleared, got %#v", reset.Pages)
+		}
+		if reset.Progress.Done != 0 || reset.Progress.Total != 2 {
+			t.Fatalf("expected done reset and total preserved, got %#v", reset.Progress)
+		}
+
+		got, err := store.Get(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("Get after ResetPages returned error: %v", err)
+		}
+		if got.Status() != StatusArchived || len(got.Pages) != 0 || got.Progress.Done != 0 || got.Progress.Total != 2 {
+			t.Fatalf("unexpected persisted document after ResetPages: %#v", got)
+		}
+	})
+}
+
+func TestStoreResetPagesWorksDuringProcessing(t *testing.T) {
+	forEachDocumentStore(t, func(t *testing.T, store Store) {
+		ctx := context.Background()
+
+		doc, err := store.Create(ctx, Document{
+			Source:           testSource,
+			SourceDocumentID: "reset-processing",
+			Progress:         Progress{Total: 1},
+		})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		if err := store.AddPage(ctx, doc.ID, Page{Index: 0, Key: "documents/processing/pages/hash-a", Hash: "hash-a"}); err != nil {
+			t.Fatalf("AddPage returned error: %v", err)
+		}
+		if err := store.TransitionTo(ctx, doc.ID, StatusResolving); err != nil {
+			t.Fatalf("TransitionTo(resolving) returned error: %v", err)
+		}
+
+		reset, err := store.ResetPages(ctx, doc.ID)
+		if err != nil {
+			t.Fatalf("ResetPages returned error: %v", err)
+		}
+		if reset.Status() != StatusResolving || len(reset.Pages) != 0 || reset.Progress.Done != 0 || reset.Progress.Total != 1 {
+			t.Fatalf("unexpected document after ResetPages: %#v", reset)
+		}
+	})
+}
+
 func TestStoreQueryOrdersAndLimitsResults(t *testing.T) {
 	forEachDocumentStore(t, func(t *testing.T, store Store) {
 		ctx := context.Background()

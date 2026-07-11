@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,6 +50,24 @@ func (s *MemoryStore) DeleteObject(ctx context.Context, key string) error {
 		return ErrObjectNotFound
 	}
 	delete(s.objects, key)
+	return nil
+}
+
+func (s *MemoryStore) DeletePrefix(ctx context.Context, prefix string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if prefix == "" {
+		return errors.New("object prefix is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.objects, key)
+		}
+	}
 	return nil
 }
 
