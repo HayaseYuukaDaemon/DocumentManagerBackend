@@ -16,7 +16,7 @@ func ManifestObjectKey(documentID string) string {
 	return path.Join(DocumentObjectPrefix(documentID), "manifest.json")
 }
 
-func PageObjectKey(documentID string, hash string) (string, error) {
+func PageObjectKey(documentID string, hash string, contentType string) (string, error) {
 	documentID = strings.TrimSpace(documentID)
 	hash = strings.TrimSpace(hash)
 	if documentID == "" {
@@ -28,5 +28,20 @@ func PageObjectKey(documentID string, hash string) (string, error) {
 	if hash == "." || hash == ".." || strings.ContainsAny(hash, `/\`) {
 		return "", errors.New("page hash must be a single safe path segment")
 	}
-	return path.Join(DocumentObjectPrefix(documentID), "pages", hash), nil
+	return path.Join(DocumentObjectPrefix(documentID), "pages", hash+"."+contentTypeExt(contentType)), nil
+}
+
+func contentTypeExt(contentType string) string {
+	switch contentType {
+	case "image/webp":
+		return "webp"
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/avif":
+		return "avif"
+	default:
+		return "bin"
+	}
 }

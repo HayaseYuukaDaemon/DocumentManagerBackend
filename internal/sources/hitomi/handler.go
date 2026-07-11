@@ -56,7 +56,7 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 	}
 	archivedPages := make([]documents.Page, 0, len(resolvedComic.Pages))
 	for index, page := range resolvedComic.Pages {
-		key, err := archive.PageObjectKey(strconv.Itoa(document.ID), page.Hash)
+		key, err := archive.PageObjectKey(strconv.Itoa(document.ID), page.Hash, page.ContentType)
 		if err != nil {
 			return archivedPages, fmt.Errorf("build page %d object key: %w", index, err)
 		}

@@ -81,7 +81,7 @@
 - 当前服务总会注册 memory object store；当配置 `s3.bucket` 或 `default_storage=s3` 时也会注册 S3-compatible object store。
 - `deleted_sweep_interval` 控制后台清理 `deleted` 文档的周期；设为 `0` 可关闭周期清理，但程序启动时仍会补扫一次。
 - `storage.ObjectInfo.ETag` 是对象抽象层暴露给 HTTP/browser 的 ETag。`PutObject` 输入携带 ETag 时 storage 原样保存并返回；未携带时优先使用具体后端提供的 ETag（例如 S3 原生 ETag），后端未提供时再由 storage 基于对象内容计算。S3 后端把自定义输入 ETag 写入 user metadata `archive-etag`，以便后续 `HEAD/GET` 能读回同一个值。
-- 页面对象使用 `documents/{document_id}/pages/{hash}` key，不再把 page index 写入 key。数据库 Pages 只表示当前页面顺序，OSS 作为 hash 寻址的内容缓存；全量刷新可以清空 Pages 后按新顺序重建，同 hash 页面直接复用已有对象。
+- 页面对象使用 `documents/{document_id}/pages/{hash}.{ext}` key，不再把 page index 写入 key。扩展名由页面 Content-Type 决定（WebP/JPEG/PNG/AVIF，其他类型回退为 `.bin`）。数据库 Pages 只表示当前页面顺序，OSS 作为 hash 寻址的内容缓存；全量刷新可以清空 Pages 后按新顺序重建，同 hash 且同类型的页面直接复用已有对象。
 - SQLite 初始化会设置 WAL 模式、busy timeout、单连接和 foreign keys。文档/页面更新应保持事务化，避免页面 hook 与状态流转之间发生陈旧写入。
 - `Progress.Done` 由 store 的 `AddPage` / `RemovePage`、`ResetPages` 和 `Purge` 维护；`Progress.Total` 由 archive app 根据来源 handler 返回的 `Document.Pages` 数量写入。`ResetPages` 只处理页面和进度，不改变文档状态。
 

@@ -42,7 +42,7 @@ func (h *fakeSourceHandler) ResolveDocument(ctx context.Context, document docume
 func (h *fakeSourceHandler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
 	pages := make([]documents.Page, 0, len(h.resolved.Pages))
 	for index, resolvedPage := range h.resolved.Pages {
-		key, err := PageObjectKey(strconv.Itoa(document.ID), resolvedPage.Hash)
+		key, err := PageObjectKey(strconv.Itoa(document.ID), resolvedPage.Hash, resolvedPage.ContentType)
 		if err != nil {
 			return pages, err
 		}
@@ -261,7 +261,7 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 	if refreshed.Status() != documents.StatusQueued || refreshed.Progress.Done != 0 || len(refreshed.Pages) != 0 {
 		t.Fatalf("full refresh should queue and clear pages: %#v", refreshed)
 	}
-	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a")
+	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a", "image/webp")
 	if err != nil {
 		t.Fatalf("PageObjectKey returned error: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 		t.Fatalf("refresh did not rebuild page metadata: %#v", rearchived)
 	}
 
-	orphanedHistoryKey, err := PageObjectKey(strconv.Itoa(doc.ID), "old-hash")
+	orphanedHistoryKey, err := PageObjectKey(strconv.Itoa(doc.ID), "old-hash", "image/webp")
 	if err != nil {
 		t.Fatalf("PageObjectKey(old-hash) returned error: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
 	if err := documentStore.TransitionTo(ctx, doc.ID, documents.StatusDownloading); err != nil {
 		t.Fatalf("TransitionTo(downloading) returned error: %v", err)
 	}
-	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a")
+	pageKey, err := PageObjectKey(strconv.Itoa(doc.ID), "hash-a", "image/webp")
 	if err != nil {
 		t.Fatalf("PageObjectKey returned error: %v", err)
 	}
@@ -394,7 +394,7 @@ func createDeletedDocumentForPurge(t *testing.T, ctx context.Context, store *doc
 	}
 	if err := store.AddPage(ctx, doc.ID, documents.Page{
 		Index:       0,
-		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-0"),
+		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-0", "image/webp"),
 		ContentType: "image/webp",
 		Size:        123,
 		Hash:        "hash-0",
@@ -403,7 +403,7 @@ func createDeletedDocumentForPurge(t *testing.T, ctx context.Context, store *doc
 	}
 	if err := store.AddPage(ctx, doc.ID, documents.Page{
 		Index:       2,
-		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-2"),
+		Key:         mustPageObjectKey(t, strconv.Itoa(doc.ID), "hash-2", "image/webp"),
 		ContentType: "image/webp",
 		Size:        789,
 		Hash:        "hash-2",
@@ -430,9 +430,9 @@ func queryDocumentsByStatus(t *testing.T, ctx context.Context, store documents.S
 	return result
 }
 
-func mustPageObjectKey(t *testing.T, documentID string, hash string) string {
+func mustPageObjectKey(t *testing.T, documentID string, hash string, contentType string) string {
 	t.Helper()
-	key, err := PageObjectKey(documentID, hash)
+	key, err := PageObjectKey(documentID, hash, contentType)
 	if err != nil {
 		t.Fatalf("PageObjectKey returned error: %v", err)
 	}
