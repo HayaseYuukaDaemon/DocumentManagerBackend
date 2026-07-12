@@ -17,6 +17,7 @@ import (
 	"document-archive/internal/documents"
 	"document-archive/internal/httpapi"
 	"document-archive/internal/sources/hitomi"
+	"document-archive/internal/sources/jmcomic"
 	"document-archive/internal/storage"
 )
 
@@ -41,7 +42,17 @@ func main() {
 	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend, cfg.DeletedSweepInterval)
 	err = archiveApp.RegisterSource(hitomi.NewHandler())
 	if err != nil {
-		logger.Error("failed to register source", "error", err)
+		logger.Error("failed to register source", "error", err, "source", hitomi.SourceTypeHitomi)
+		os.Exit(1)
+	}
+	jh, err := jmcomic.NewHandler()
+	if err != nil {
+		logger.Error("failed to create jmcomic handler", "error", err)
+		os.Exit(1)
+	}
+	err = archiveApp.RegisterSource(jh)
+	if err != nil {
+		logger.Error("failed to register source", "error", err, "source", jmcomic.SourceTypeJmcomic)
 		os.Exit(1)
 	}
 	if err := registerObjectStores(archiveApp, cfg, logger); err != nil {
