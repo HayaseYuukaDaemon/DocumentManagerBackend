@@ -4,7 +4,7 @@
 
 ### 实现nhentai handler
 
-### 实现jmcomic handler
+### 实现细粒度权限控制
 
 ## 优化目标
 
