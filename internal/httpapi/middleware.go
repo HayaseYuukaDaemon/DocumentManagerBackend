@@ -24,6 +24,7 @@ type RouteConfig struct {
 
 func (ch *ChainHandler) preprocess(next http.Handler, routeConfig RouteConfig) http.Handler {
 	preprocessors := []preprocessFunc{
+		processCORS,
 		processAuth,
 	}
 
@@ -42,20 +43,20 @@ func (ch *ChainHandler) preprocess(next http.Handler, routeConfig RouteConfig) h
 
 func corsHandler(cfg config.Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if handled := processCORS(cfg, w, r); handled {
+		if handled := processCORS(PreprocessConfig{Config: cfg}, w, r); handled {
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func processCORS(cfg config.Config, w http.ResponseWriter, r *http.Request) bool {
+func processCORS(cfg PreprocessConfig, w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin == "" || len(cfg.AllowCORS) == 0 {
+	if origin == "" || len(cfg.Config.AllowCORS) == 0 {
 		return false
 	}
 
-	allowOrigin, ok := matchCORSOrigin(cfg.AllowCORS, origin)
+	allowOrigin, ok := matchCORSOrigin(cfg.Config.AllowCORS, origin)
 	if !ok {
 		return false
 	}
