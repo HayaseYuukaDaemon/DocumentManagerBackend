@@ -1,100 +1,232 @@
 # document-archive
 
-`document-archive` is the Go archive/ingest service for ComicManager.
+`document-archive` 是 ComicManager 的 Go 归档/采集服务。它负责解析来源元数据、下载和归档页面、维护任务状态并生成文档快照；页面等二进制对象由 memory 或 S3-compatible 对象存储保存。
 
-It owns source-specific download and archive workflows. Actual binary storage is delegated to an S3-compatible object store such as Cloudflare R2, MinIO, or AWS S3.
+当前支持的来源：
 
-## Current scope
+- Hitomi
+- JMComic（仅支持单章节作品）
 
-- HTTP API skeleton
-- Bearer-token auth middleware
-- SQLite document store with in-memory option
-- Document status worker
-- Memory and S3-compatible ObjectStore backends
-- Hitomi resolver and source handler
+## 功能概览
 
-## Run
+- 基于 `http.ServeMux` 的 HTTP API
+- 基于 token、角色和路由权限的可选鉴权
+- SQLite 文档存储，以及行为对齐的内存实现
+- queued 归档 worker 和 deleted 清理 worker
+- memory 与 S3-compatible 对象存储
+- 页面 hash 寻址、对象复用和全量刷新
+- deleted、purged、restore 文档生命周期
+- 显式 Origin 白名单或通配符 CORS
 
-```bash
-ARCHIVE_ADDR=:8080 go run ./cmd/server
-```
+## 运行
 
-Document metadata is stored in `document-archive.db` by default.
-
-Configuration is loaded from defaults, then `config.yml`, then environment variables. Environment variables always win over `config.yml`.
-
-Example `config.yml`:
-
-```yaml
-addr: ":8080"
-auth_token: "dev-secret"
-log_level: "info"
-default_storage: "s3"
-document_store: "sqlite"
-sqlite_path: "document-archive.db"
-s3:
-  endpoint: "https://<account-id>.r2.cloudflarestorage.com"
-  bucket: "document-archive"
-  region: "auto"
-  access_key_id: "..."
-  secret_access_key: "..."
-  session_token: ""
-  use_path_style: false
-```
-
-Optional environment overrides:
+要求 Go 1.25.5 或兼容版本。
 
 ```bash
-ARCHIVE_TOKEN=dev-secret go run ./cmd/server
-ARCHIVE_DEFAULT_STORAGE=memory go run ./cmd/server
-ARCHIVE_DOCUMENT_STORE=memory go run ./cmd/server
-ARCHIVE_SQLITE_PATH=/var/lib/document-archive/documents.db go run ./cmd/server
-```
-
-S3-compatible object storage:
-
-```bash
-ARCHIVE_DEFAULT_STORAGE=s3 \
-ARCHIVE_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com \
-ARCHIVE_S3_BUCKET=document-archive \
-ARCHIVE_S3_REGION=auto \
-ARCHIVE_S3_ACCESS_KEY_ID=... \
-ARCHIVE_S3_SECRET_ACCESS_KEY=... \
 go run ./cmd/server
 ```
 
-For MinIO or other path-style services, also set:
+构建和测试：
 
 ```bash
-ARCHIVE_S3_USE_PATH_STYLE=true
+go build -o bin/document-archive ./cmd/server
+go test ./...
 ```
 
-## API sketch
+服务默认监听 `:8080`，文档元数据默认写入当前目录下的 `document-archive.db`。
 
-Request a document archive:
+## 配置
+
+配置只来自内置默认值和当前工作目录下的 `config.yml`，不读取环境变量。首次启动时如果 `config.yml` 不存在，服务会以 `0600` 权限创建默认配置并立即应用。文件中的字段覆盖内置默认值，未配置字段继续使用默认值。
+
+完整示例见 [`internal/config/config.demo.yml`](internal/config/config.demo.yml)。
+
+```yaml
+addr: ":8080"
+log_level: "info"
+default_storage: "memory"
+document_store: "sqlite"
+sqlite_path: "document-archive.db"
+deleted_sweep_interval: "24h"
+allow_cors: []
+
+s3:
+  endpoint: ""
+  bucket: ""
+  region: "us-east-1"
+  access_key_id: ""
+  secret_access_key: ""
+  session_token: ""
+  use_path_style: false
+
+role:
+  admin-token:
+    name: "admin"
+    admin: true
+  contributor-token:
+    name: "contributor"
+    permissions:
+      - "document:create"
+      - "document:read"
+  viewer-token:
+    name: "viewer"
+    permissions:
+      - "document:read"
+```
+
+主要配置项：
+
+- `document_store`：`sqlite` 或 `memory`。
+- `default_storage`：未在归档请求中指定存储时使用的后端，支持 `memory` 或 `s3`。
+- `deleted_sweep_interval`：deleted 文档的周期清理间隔；设为 `0` 可关闭周期清理，但启动时仍会补扫一次。
+- `allow_cors`：允许的 Origin 列表；空列表表示不启用 CORS，支持精确 Origin 和 `"*"`。
+- `role`：以 Bearer Token 为 key 的角色映射；为空时不启用鉴权。
+
+服务始终注册 memory 对象存储。当 `default_storage` 为 `s3` 或配置了 `s3.bucket` 时，也会注册 S3-compatible 后端。Cloudflare R2、AWS S3 通常使用 virtual-hosted-style；MinIO 等服务可设置 `use_path_style: true`。
+
+## 权限
+
+业务 API 使用 `Authorization: Bearer <token>`。`admin: true` 的角色拥有全部权限，普通角色可配置：
+
+- `document:create`
+- `document:update`
+- `document:delete`
+- `document:read`
+- `document:refresh`
+
+当前路由权限：
+
+- 请求归档：`document:create`
+- 查询文档、读取文档和页面：`document:read`
+- 删除文档：`document:delete`
+- 刷新或恢复文档：`document:refresh`
+- `/healthz`：公开
+
+已配置角色但 token 缺失或无效时返回 `401`；角色缺少路由权限时返回 `403`。CORS 预检在鉴权之前处理。
+
+## API
+
+以下示例假定服务运行在 `http://localhost:8080`，并使用示例管理员 token：
 
 ```bash
-curl -X POST http://localhost:8080/v1/documents/request \
+API=http://localhost:8080
+TOKEN=admin-token
+```
+
+### 健康检查
+
+```bash
+curl "$API/healthz"
+```
+
+### 请求归档
+
+```bash
+curl -X POST "$API/v1/documents/request" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"source":"hitomi","source_document_id":"3886065"}'
 ```
 
-Get a document:
+JMComic 请求将 `source` 改为 `jmcomic`。请求体还可通过 `storage_backend` 为单个文档指定 `memory` 或 `s3`。
+
+### 获取文档
 
 ```bash
-curl http://localhost:8080/v1/documents/<document_id>
+curl "$API/v1/documents/<document_id>" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-Query documents by source metadata:
+### 按来源 ID 查询
 
 ```bash
-curl -X POST http://localhost:8080/v1/documents/query \
+curl -X POST "$API/v1/documents/query" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"by_source_document_id","params":{"source":"hitomi","source_document_id":"3886065"}}'
+  -d '{
+    "mode":"by_source_document_id",
+    "params":{"source":"hitomi","source_document_id":"3886065"}
+  }'
 ```
 
-Soft-remove a document:
+### 按状态查询
 
 ```bash
-curl -X DELETE http://localhost:8080/v1/documents/<document_id>
+curl -X POST "$API/v1/documents/query" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mode":"by_status",
+    "params":{"status":"archived"},
+    "orderby":"updated_at",
+    "order":"DESC",
+    "limit":20
+  }'
 ```
+
+显式状态查询支持 `deleted` 和 `purged`。可用排序字段为 `id`、`created_at`、`updated_at`，排序方向为 `ASC` 或 `DESC`。
+
+### 获取页面
+
+```bash
+curl -L "$API/v1/documents/<document_id>/pages/<page_index>" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o page.bin
+```
+
+memory 后端由服务直接返回对象内容；S3 后端返回有效期 24 小时的预签名 GET URL，并通过 `302` 跳转。
+
+### 刷新和恢复
+
+```bash
+curl -X POST "$API/v1/documents/<document_id>/refresh?mode=all" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+支持的 mode：
+
+- `only_meta_data`：重新入队并解析元数据，保留现有页面和进度。
+- `all`：重新入队，清空当前页面元数据和 `Progress.Done`；不删除对象存储中的 hash 对象，worker 可直接复用。
+- `restore`：将 `deleted` 或 `purged` 文档恢复为 queued，继续使用原文档 ID。
+
+### 删除文档
+
+```bash
+curl -X DELETE "$API/v1/documents/<document_id>" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+删除首先把文档标记为 `deleted`。后台维护任务清理 `documents/{document_id}/` 对象前缀成功后，才会清空页面和进度并推进为 `purged`；对象删除失败时保持 `deleted`，等待下一次重试。
+
+## 文档生命周期
+
+文档状态包括：
+
+```text
+queued -> resolving -> downloading -> archived
+                  \-> failed
+
+active -> deleted -> purged
+deleted/purged --restore--> queued
+```
+
+同一 `(source, source_document_id)` 在整个文档集合中全局唯一，deleted 和 purged 记录也继续占用该身份。重新加入已删除文档必须使用 `restore`，不能再次创建新记录。
+
+## 页面与对象存储
+
+数据库中的 `Document.Pages` 表示当前页面顺序；对象存储作为 hash 寻址的内容缓存。页面 key 格式为：
+
+```text
+documents/{document_id}/pages/{hash}.{ext}
+```
+
+全量刷新会清空数据库页面记录，再通过 `HEAD` 检查并复用已存在的 hash 对象。页面对象写入成功后才记录页面进度。文档归档完成时还会写入 `documents/{document_id}/manifest.json` 对象；当前没有公开的 Manifest HTTP 路由。
+
+## 项目结构
+
+- `cmd/server/`：服务装配、worker 和 HTTP server 启动。
+- `internal/archive/`：归档流程、刷新、清理和来源/存储注册。
+- `internal/documents/`：文档模型、状态机以及 memory/SQLite store。
+- `internal/httpapi/`：路由、鉴权、CORS 和响应。
+- `internal/sources/`：Hitomi 与 JMComic 来源实现。
+- `internal/storage/`：memory 与 S3-compatible 对象存储。
