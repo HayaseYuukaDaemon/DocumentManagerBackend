@@ -38,14 +38,21 @@ func TestCORSHandlerAddsHeadersForAllowedOrigin(t *testing.T) {
 
 func TestCORSHandlerHandlesPreflightBeforeAuth(t *testing.T) {
 	cfg := config.Config{
-		AuthToken: "secret",
+		Roles: map[string]config.Role{
+			"a": {
+				Name:        "admin",
+				Admin:       true,
+				Permissions: []config.Permissions{},
+			},
+		},
 		AllowCORS: []string{"http://localhost:5173"},
 	}
 	nextCalled := false
-	handler := corsHandler(cfg, preprocessChainHandler(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ch := &ChainHandler{cfg: cfg}
+	handler := corsHandler(cfg, ch.preprocess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		w.WriteHeader(http.StatusAccepted)
-	})))
+	}), RouteConfig{}))
 
 	req := httptest.NewRequest(http.MethodOptions, "/v1/documents/query", nil)
 	req.Header.Set("Origin", "http://localhost:5173")
@@ -67,12 +74,15 @@ func TestCORSHandlerHandlesPreflightBeforeAuth(t *testing.T) {
 
 func TestCORSHandlerAddsHeadersToUnauthorizedResponse(t *testing.T) {
 	cfg := config.Config{
-		AuthToken: "secret",
+		Roles: map[string]config.Role{
+			"secret": {Name: "reader", Permissions: []config.Permissions{config.DocumentRead}},
+		},
 		AllowCORS: []string{"http://localhost:5173"},
 	}
-	handler := corsHandler(cfg, preprocessChainHandler(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ch := &ChainHandler{cfg: cfg}
+	handler := corsHandler(cfg, ch.preprocess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("next handler should not be called for unauthorized request")
-	})))
+	}), RouteConfig{RequiredPermissions: []config.Permissions{config.DocumentRead}}))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/documents/1", nil)
 	req.Header.Set("Origin", "http://localhost:5173")
@@ -130,7 +140,9 @@ func TestCORSHandlerSupportsWildcard(t *testing.T) {
 
 func TestRouterHandlesBusinessPreflightWithoutExplicitOptionsRoutes(t *testing.T) {
 	cfg := config.Config{
-		AuthToken: "secret",
+		Roles: map[string]config.Role{
+			"secret": {Name: "reader", Permissions: []config.Permissions{config.DocumentRead}},
+		},
 		AllowCORS: []string{"http://localhost:5173"},
 	}
 	router := NewRouter(cfg, nil)
@@ -147,5 +159,87 @@ func TestRouterHandlesBusinessPreflightWithoutExplicitOptionsRoutes(t *testing.T
 	}
 	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
 		t.Fatalf("unexpected allow origin: %q", got)
+	}
+}
+
+func TestProcessAuthAllowsRequestsWhenNoRolesConfigured(t *testing.T) {
+	cfg := PreprocessConfig{
+		RouteConfig: RouteConfig{RequiredPermissions: []config.Permissions{config.DocumentDelete}},
+	}
+	request := httptest.NewRequest(http.MethodDelete, "/v1/documents/1", nil)
+	response := httptest.NewRecorder()
+
+	if handled := processAuth(cfg, response, request); handled {
+		t.Fatalf("authentication should be disabled when no roles are configured")
+	}
+}
+
+func TestProcessAuthRejectsMissingAndUnknownTokens(t *testing.T) {
+	cfg := PreprocessConfig{
+		Config: config.Config{Roles: map[string]config.Role{
+			"reader-token": {Name: "reader", Permissions: []config.Permissions{config.DocumentRead}},
+		}},
+		RouteConfig: RouteConfig{RequiredPermissions: []config.Permissions{config.DocumentRead}},
+	}
+
+	for _, authorization := range []string{"", "Bearer unknown-token"} {
+		t.Run(authorization, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/documents/1", nil)
+			if authorization != "" {
+				request.Header.Set("Authorization", authorization)
+			}
+			response := httptest.NewRecorder()
+
+			if handled := processAuth(cfg, response, request); !handled {
+				t.Fatalf("invalid credentials should handle the request")
+			}
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("unexpected status: %d", response.Code)
+			}
+		})
+	}
+}
+
+func TestProcessAuthRejectsRoleWithoutRequiredPermission(t *testing.T) {
+	cfg := PreprocessConfig{
+		Config: config.Config{Roles: map[string]config.Role{
+			"reader-token": {Name: "reader", Permissions: []config.Permissions{config.DocumentRead}},
+		}},
+		RouteConfig: RouteConfig{RequiredPermissions: []config.Permissions{config.DocumentDelete}},
+	}
+	request := httptest.NewRequest(http.MethodDelete, "/v1/documents/1", nil)
+	request.Header.Set("Authorization", "Bearer reader-token")
+	response := httptest.NewRecorder()
+
+	if handled := processAuth(cfg, response, request); !handled {
+		t.Fatalf("forbidden credentials should handle the request")
+	}
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+}
+
+func TestProcessAuthAllowsConfiguredPermissionAndAdmin(t *testing.T) {
+	tests := map[string]config.Role{
+		"reader-token": {Name: "reader", Permissions: []config.Permissions{config.DocumentRead}},
+		"admin-token":  {Name: "admin", Admin: true},
+	}
+
+	for token, role := range tests {
+		t.Run(role.Name, func(t *testing.T) {
+			cfg := PreprocessConfig{
+				Config: config.Config{Roles: map[string]config.Role{token: role}},
+				RouteConfig: RouteConfig{RequiredPermissions: []config.Permissions{
+					config.DocumentRead,
+				}},
+			}
+			request := httptest.NewRequest(http.MethodGet, "/v1/documents/1", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+
+			if handled := processAuth(cfg, response, request); handled {
+				t.Fatalf("authorized credentials should continue to the next handler")
+			}
+		})
 	}
 }

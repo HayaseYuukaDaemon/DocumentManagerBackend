@@ -1,23 +1,38 @@
 package httpapi
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"strings"
 
 	"document-archive/internal/config"
 )
 
-type preprocessFunc func(cfg config.Config, w http.ResponseWriter, r *http.Request) (handled bool)
+type PreprocessConfig struct {
+	Config      config.Config
+	RouteConfig RouteConfig
+}
 
-func preprocessChainHandler(cfg config.Config, next http.Handler) http.Handler {
+type preprocessFunc func(cfg PreprocessConfig, w http.ResponseWriter, r *http.Request) (handled bool)
+
+type ChainHandler struct {
+	cfg config.Config
+}
+
+type RouteConfig struct {
+	RequiredPermissions []config.Permissions
+}
+
+func (ch *ChainHandler) preprocess(next http.Handler, routeConfig RouteConfig) http.Handler {
 	preprocessors := []preprocessFunc{
 		processAuth,
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, process := range preprocessors {
-			if handled := process(cfg, w, r); handled {
+			if handled := process(PreprocessConfig{
+				Config:      ch.cfg,
+				RouteConfig: routeConfig,
+			}, w, r); handled {
 				return
 			}
 		}
@@ -75,16 +90,28 @@ func matchCORSOrigin(allowList []string, origin string) (string, bool) {
 	return "", false
 }
 
-func processAuth(cfg config.Config, w http.ResponseWriter, r *http.Request) bool {
-	if cfg.AuthToken == "" {
+func processAuth(cfg PreprocessConfig, w http.ResponseWriter, r *http.Request) bool {
+	if len(cfg.Config.Roles) == 0 {
 		return false
 	}
 
 	header := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(header, "Bearer ")
-	if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AuthToken)) != 1 {
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return true
+	}
+	role, ok := cfg.Config.Roles[token]
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return true
+	}
+
+	for _, required := range cfg.RouteConfig.RequiredPermissions {
+		if !role.HasPermission(required) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return true
+		}
 	}
 	return false
 }

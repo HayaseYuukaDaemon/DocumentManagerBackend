@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -11,8 +12,8 @@ import (
 	"document-archive/internal/storage"
 )
 
-func TestLoadUsesDefaultsWithoutConfigFile(t *testing.T) {
-	chdirTemp(t)
+func TestLoadCreatesAndUsesDefaultsWithoutConfigFile(t *testing.T) {
+	dir := chdirTemp(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -40,8 +41,24 @@ func TestLoadUsesDefaultsWithoutConfigFile(t *testing.T) {
 	if len(cfg.AllowCORS) != 0 {
 		t.Fatalf("allow_cors should default to empty, got %#v", cfg.AllowCORS)
 	}
-	if cfg.S3UsePathStyle {
+	if cfg.S3.UsePathStyle {
 		t.Fatalf("s3 use path style should default to false")
+	}
+
+	info, err := os.Stat(filepath.Join(dir, configFileName))
+	if err != nil {
+		t.Fatalf("generated config file not found: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected generated config permissions: %o", info.Mode().Perm())
+	}
+
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatalf("reload generated config returned error: %v", err)
+	}
+	if !reflect.DeepEqual(reloaded, cfg) {
+		t.Fatalf("generated config should round-trip: got %#v, want %#v", reloaded, cfg)
 	}
 }
 
@@ -49,7 +66,6 @@ func TestLoadReadsConfigYAML(t *testing.T) {
 	dir := chdirTemp(t)
 	writeConfigFile(t, dir, `
 addr: ":9090"
-auth_token: "config-token"
 log_level: "debug"
 default_storage: "s3"
 document_store: "memory"
@@ -66,6 +82,15 @@ s3:
   secret_access_key: "config-secret"
   session_token: "config-session"
   use_path_style: true
+role:
+  admin-token:
+    name: "admin"
+    admin: true
+  contributor-token:
+    name: "contributor"
+    permissions:
+      - "document:create"
+      - "document:read"
 `)
 
 	cfg, err := Load()
@@ -75,9 +100,6 @@ s3:
 
 	if cfg.Addr != ":9090" {
 		t.Fatalf("unexpected addr: %q", cfg.Addr)
-	}
-	if cfg.AuthToken != "config-token" {
-		t.Fatalf("unexpected auth token: %q", cfg.AuthToken)
 	}
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Fatalf("unexpected log level: %v", cfg.LogLevel)
@@ -97,14 +119,31 @@ s3:
 	if !slices.Equal(cfg.AllowCORS, []string{"http://localhost:5173", "https://example.com"}) {
 		t.Fatalf("unexpected allow_cors: %#v", cfg.AllowCORS)
 	}
-	if cfg.S3Endpoint != "http://127.0.0.1:9000" || cfg.S3Bucket != "archive" || cfg.S3Region != "us-east-1" {
+	if cfg.S3.Endpoint != "http://127.0.0.1:9000" || cfg.S3.Bucket != "archive" || cfg.S3.Region != "us-east-1" {
 		t.Fatalf("unexpected s3 endpoint/bucket/region: %#v", cfg)
 	}
-	if cfg.S3AccessKeyID != "config-key" || cfg.S3SecretAccessKey != "config-secret" || cfg.S3SessionToken != "config-session" {
+	if cfg.S3.AccessKeyID != "config-key" || cfg.S3.SecretAccessKey != "config-secret" || cfg.S3.SessionToken != "config-session" {
 		t.Fatalf("unexpected s3 credentials: %#v", cfg)
 	}
-	if !cfg.S3UsePathStyle {
+	if !cfg.S3.UsePathStyle {
 		t.Fatalf("s3 use path style should come from config")
+	}
+	admin, ok := cfg.Roles["admin-token"]
+	if !ok || admin.Name != "admin" || !admin.Admin {
+		t.Fatalf("unexpected admin role: %#v", admin)
+	}
+	if !admin.HasPermission(DocumentDelete) {
+		t.Fatalf("admin role should have every permission")
+	}
+	contributor, ok := cfg.Roles["contributor-token"]
+	if !ok || contributor.Name != "contributor" {
+		t.Fatalf("unexpected contributor role: %#v", contributor)
+	}
+	if !contributor.HasPermission(DocumentCreate) || !contributor.HasPermission(DocumentRead) {
+		t.Fatalf("contributor should have configured permissions: %#v", contributor.Permissions)
+	}
+	if contributor.HasPermission(DocumentDelete) {
+		t.Fatalf("contributor should not have unconfigured permissions")
 	}
 }
 
@@ -126,8 +165,38 @@ s3:
 	if cfg.Addr != ":9090" {
 		t.Fatalf("env should not override config addr, got %q", cfg.Addr)
 	}
-	if !cfg.S3UsePathStyle {
+	if !cfg.S3.UsePathStyle {
 		t.Fatalf("env should not override config bool")
+	}
+	if cfg.DefaultStorageBackend != storage.MemoryStorageName || cfg.DocumentStore != "sqlite" {
+		t.Fatalf("partial config should retain defaults: %#v", cfg)
+	}
+}
+
+func TestLoadNormalizesConfigValues(t *testing.T) {
+	dir := chdirTemp(t)
+	writeConfigFile(t, dir, `
+log_level: "warning"
+default_storage: " S3 "
+document_store: " MEMORY "
+deleted_sweep_interval: "30m"
+`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.LogLevel != slog.LevelWarn {
+		t.Fatalf("unexpected log level: %v", cfg.LogLevel)
+	}
+	if cfg.DefaultStorageBackend != storage.S3StorageName {
+		t.Fatalf("unexpected normalized storage: %q", cfg.DefaultStorageBackend)
+	}
+	if cfg.DocumentStore != "memory" {
+		t.Fatalf("unexpected normalized document store: %q", cfg.DocumentStore)
+	}
+	if cfg.DeletedSweepInterval != 30*time.Minute {
+		t.Fatalf("unexpected deleted sweep interval: %v", cfg.DeletedSweepInterval)
 	}
 }
 
@@ -148,6 +217,16 @@ func TestLoadReturnsErrorForInvalidDeletedSweepInterval(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("Load should return error for invalid deleted_sweep_interval")
+	}
+}
+
+func TestLoadReturnsErrorForNegativeDeletedSweepInterval(t *testing.T) {
+	dir := chdirTemp(t)
+	writeConfigFile(t, dir, "deleted_sweep_interval: -1s")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load should return error for negative deleted_sweep_interval")
 	}
 }
 

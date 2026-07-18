@@ -23,13 +23,25 @@ func NewRouter(cfg config.Config, app *archive.App) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
-	mux.Handle("POST /v1/documents/request", preprocessChainHandler(cfg, http.HandlerFunc(router.requestDocument)))
-	mux.Handle("POST /v1/documents/query", preprocessChainHandler(cfg, http.HandlerFunc(router.queryDocument)))
-	mux.Handle("GET /v1/documents/{document_id}", preprocessChainHandler(cfg, http.HandlerFunc(router.getDocument)))
-	mux.Handle("DELETE /v1/documents/{document_id}", preprocessChainHandler(cfg, http.HandlerFunc(router.removeDocument)))
-	mux.Handle("GET /v1/documents/{document_id}/manifest", preprocessChainHandler(cfg, http.HandlerFunc(router.getManifest)))
-	mux.Handle("POST /v1/documents/{document_id}/refresh", preprocessChainHandler(cfg, http.HandlerFunc(router.refreshDocument)))
-	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", preprocessChainHandler(cfg, http.HandlerFunc(router.getPage)))
+	ch := &ChainHandler{cfg: cfg}
+	mux.Handle("POST /v1/documents/request", ch.preprocess(http.HandlerFunc(router.requestDocument), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentCreate},
+	}))
+	mux.Handle("POST /v1/documents/query", ch.preprocess(http.HandlerFunc(router.queryDocument), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentRead},
+	}))
+	mux.Handle("GET /v1/documents/{document_id}", ch.preprocess(http.HandlerFunc(router.getDocument), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentRead},
+	}))
+	mux.Handle("DELETE /v1/documents/{document_id}", ch.preprocess(http.HandlerFunc(router.removeDocument), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentDelete},
+	}))
+	mux.Handle("POST /v1/documents/{document_id}/refresh", ch.preprocess(http.HandlerFunc(router.refreshDocument), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentRefresh},
+	}))
+	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", ch.preprocess(http.HandlerFunc(router.getPage), RouteConfig{
+		RequiredPermissions: []config.Permissions{config.DocumentRead},
+	}))
 	return corsHandler(cfg, mux)
 }
 

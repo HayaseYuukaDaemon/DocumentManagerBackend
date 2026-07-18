@@ -1,5 +1,4 @@
 addr: ":8080"
-auth_token: ""
 log_level: "info"
 default_storage: "memory"
 document_store: "sqlite"
@@ -14,3 +13,16 @@ s3:
   secret_access_key: ""
   session_token: ""
   use_path_style: false
+role:
+  "admin-token":
+    name: "admin"
+    admin: true
+  "contributor-token":
+    name: "contributor"
+    permissions:
+      - "document:create"
+      - "document:read"
+  "viewer-token":
+    name: "viewer"
+    permissions:
+      - "document:read"

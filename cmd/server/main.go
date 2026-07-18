@@ -117,22 +117,22 @@ func registerObjectStores(app *archive.App, cfg config.Config, logger *slog.Logg
 		return nil
 	}
 	store, err := storage.NewS3Store(storage.S3Config{
-		Endpoint:        cfg.S3Endpoint,
-		Bucket:          cfg.S3Bucket,
-		Region:          cfg.S3Region,
-		AccessKeyID:     cfg.S3AccessKeyID,
-		SecretAccessKey: cfg.S3SecretAccessKey,
-		SessionToken:    cfg.S3SessionToken,
-		UsePathStyle:    cfg.S3UsePathStyle,
+		Endpoint:        cfg.S3.Endpoint,
+		Bucket:          cfg.S3.Bucket,
+		Region:          cfg.S3.Region,
+		AccessKeyID:     cfg.S3.AccessKeyID,
+		SecretAccessKey: cfg.S3.SecretAccessKey,
+		SessionToken:    cfg.S3.SessionToken,
+		UsePathStyle:    cfg.S3.UsePathStyle,
 	})
 	if err != nil {
 		return err
 	}
 	app.RegisterStorage(store)
-	logger.Info("registered s3 object store", "bucket", cfg.S3Bucket, "endpoint", cfg.S3Endpoint, "region", cfg.S3Region, "path_style", cfg.S3UsePathStyle)
+	logger.Info("registered s3 object store", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint, "region", cfg.S3.Region, "path_style", cfg.S3.UsePathStyle)
 	return nil
 }
 
 func shouldRegisterS3(cfg config.Config) bool {
-	return strings.EqualFold(string(cfg.DefaultStorageBackend), string(storage.S3StorageName)) || strings.TrimSpace(cfg.S3Bucket) != ""
+	return strings.EqualFold(string(cfg.DefaultStorageBackend), string(storage.S3StorageName)) || strings.TrimSpace(cfg.S3.Bucket) != ""
 }
