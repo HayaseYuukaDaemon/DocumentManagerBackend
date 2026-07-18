@@ -73,7 +73,7 @@ func (h *Handler) ResolveDocument(ctx context.Context, document documents.Docume
 	}
 	return documents.Document{
 		Source:           SourceTypeJmcomic,
-		SourceMeta:       append(json.RawMessage(nil), photo.Raw...),
+		SourceMeta:       append(json.RawMessage(nil), album.Raw...),
 		SourceDocumentID: string(album.ID),
 		Title:            album.Name,
 		Pages:            pages,
