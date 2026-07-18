@@ -42,7 +42,7 @@ func NewRouter(cfg config.Config, app *archive.App) http.Handler {
 	mux.Handle("GET /v1/documents/{document_id}/pages/{page_index}", ch.preprocess(http.HandlerFunc(router.getPage), RouteConfig{
 		RequiredPermissions: []config.Permissions{config.DocumentRead},
 	}))
-	return mux
+	return corsHandler(cfg, mux)
 }
 
 func (r *Router) health(w http.ResponseWriter, req *http.Request) {
