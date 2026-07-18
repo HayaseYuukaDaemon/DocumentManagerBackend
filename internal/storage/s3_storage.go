@@ -20,13 +20,14 @@ import (
 const s3ObjectETagMetadataKey = "archive-etag"
 
 type S3Config struct {
-	Endpoint        string
-	Bucket          string
-	Region          string
-	AccessKeyID     string
-	SecretAccessKey string
-	SessionToken    string
-	UsePathStyle    bool
+	InternalEndpoint string `yaml:"internal_endpoint"`
+	Endpoint         string `yaml:"endpoint"`
+	Bucket           string `yaml:"bucket"`
+	Region           string `yaml:"region"`
+	AccessKeyID      string `yaml:"access_key_id"`
+	SecretAccessKey  string `yaml:"secret_access_key"`
+	SessionToken     string `yaml:"session_token"`
+	UsePathStyle     bool   `yaml:"use_path_style"`
 }
 
 type S3Store struct {
@@ -37,11 +38,6 @@ type S3Store struct {
 }
 
 func NewS3Store(cfg S3Config) (*S3Store, error) {
-	cfg.Bucket = strings.TrimSpace(cfg.Bucket)
-	cfg.Region = strings.TrimSpace(cfg.Region)
-	cfg.AccessKeyID = strings.TrimSpace(cfg.AccessKeyID)
-	cfg.SecretAccessKey = strings.TrimSpace(cfg.SecretAccessKey)
-	cfg.Endpoint = strings.TrimSpace(cfg.Endpoint)
 	if cfg.Bucket == "" {
 		return nil, errors.New("s3 bucket is required")
 	}
@@ -63,13 +59,28 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 	if cfg.Endpoint != "" {
 		options.BaseEndpoint = aws.String(cfg.Endpoint)
 	}
-	client := s3.New(options)
-	return &S3Store{
-		storageName: S3StorageName,
-		bucket:      cfg.Bucket,
-		client:      client,
-		presign:     s3.NewPresignClient(client),
-	}, nil
+	var client *s3.Client
+	if cfg.InternalEndpoint != "" {
+		options.BaseEndpoint = aws.String(cfg.InternalEndpoint)
+		client = s3.New(options)
+		presignOptions := options
+		presignOptions.BaseEndpoint = aws.String(cfg.Endpoint)
+		return &S3Store{
+			storageName: S3StorageName,
+			bucket:      cfg.Bucket,
+			client:      client,
+			presign:     s3.NewPresignClient(s3.New(presignOptions)),
+		}, nil
+	} else {
+		client = s3.New(options)
+		return &S3Store{
+			storageName: S3StorageName,
+			bucket:      cfg.Bucket,
+			client:      client,
+			presign:     s3.NewPresignClient(client),
+		}, nil
+	}
+
 }
 
 func (s *S3Store) StorageName() StorageName {

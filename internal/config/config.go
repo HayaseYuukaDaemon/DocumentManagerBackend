@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -38,16 +39,6 @@ func (r Role) HasPermission(permission Permissions) bool {
 	return slices.Contains(r.Permissions, permission)
 }
 
-type S3Config struct {
-	Endpoint        string `yaml:"endpoint"`
-	Bucket          string `yaml:"bucket"`
-	Region          string `yaml:"region"`
-	AccessKeyID     string `yaml:"access_key_id"`
-	SecretAccessKey string `yaml:"secret_access_key"`
-	SessionToken    string `yaml:"session_token"`
-	UsePathStyle    bool   `yaml:"use_path_style"`
-}
-
 type Config struct {
 	Addr                  string              `yaml:"addr"`
 	LogLevel              slog.Level          `yaml:"log_level"`
@@ -56,30 +47,8 @@ type Config struct {
 	SQLitePath            string              `yaml:"sqlite_path"`
 	DeletedSweepInterval  time.Duration       `yaml:"deleted_sweep_interval"`
 	AllowCORS             []string            `yaml:"allow_cors"`
-	S3                    S3Config            `yaml:"s3"`
+	S3                    *storage.S3Config   `yaml:"s3"`
 	Roles                 map[string]Role     `yaml:"role"`
-}
-
-type fileConfig struct {
-	Addr                  *string         `yaml:"addr"`
-	LogLevel              *string         `yaml:"log_level"`
-	DefaultStorageBackend *string         `yaml:"default_storage"`
-	DocumentStore         *string         `yaml:"document_store"`
-	SQLitePath            *string         `yaml:"sqlite_path"`
-	DeletedSweepInterval  *string         `yaml:"deleted_sweep_interval"`
-	AllowCORS             []string        `yaml:"allow_cors"`
-	S3                    fileS3Config    `yaml:"s3"`
-	Roles                 map[string]Role `yaml:"role"`
-}
-
-type fileS3Config struct {
-	Endpoint        *string `yaml:"endpoint"`
-	Bucket          *string `yaml:"bucket"`
-	Region          *string `yaml:"region"`
-	AccessKeyID     *string `yaml:"access_key_id"`
-	SecretAccessKey *string `yaml:"secret_access_key"`
-	SessionToken    *string `yaml:"session_token"`
-	UsePathStyle    *bool   `yaml:"use_path_style"`
 }
 
 const configFileName = "config.yml"
@@ -89,37 +58,94 @@ func Load() (Config, error) {
 }
 
 func load(path string) (Config, error) {
-	cfg := defaultConfig()
-
-	fileCfg, err := readFileConfig(path)
+	cfg, err := readConfig(path)
 	if errors.Is(err, os.ErrNotExist) {
+		cfg = defaultConfig()
 		if err := writeDefaultConfig(path, cfg); err != nil {
 			return Config{}, err
 		}
-		fileCfg, err = readFileConfig(path)
+		return readConfig(path)
 	}
-	if err != nil {
-		return Config{}, err
-	}
-	if err := applyFileConfig(&cfg, fileCfg); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
+	return cfg, err
 }
 
-func readFileConfig(path string) (fileConfig, error) {
+func readConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fileConfig{}, fmt.Errorf("read %s: %w", path, err)
+		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	var cfg fileConfig
+	var cfg Config
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
-		return fileConfig{}, fmt.Errorf("parse %s: %w", path, err)
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := requireConfigFields(data); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if cfg.DeletedSweepInterval < 0 {
+		return Config{}, fmt.Errorf("parse %s: deleted_sweep_interval must not be negative", path)
+	}
+	cfg.DefaultStorageBackend = storage.StorageName(strings.ToLower(strings.TrimSpace(string(cfg.DefaultStorageBackend))))
+	cfg.DocumentStore = strings.ToLower(strings.TrimSpace(cfg.DocumentStore))
 	return cfg, nil
+}
+
+func requireConfigFields(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	if len(document.Content) == 0 {
+		return errors.New("config must be a mapping")
+	}
+	return requireStructFields(document.Content[0], reflect.TypeOf(Config{}), "")
+}
+
+func requireStructFields(node *yaml.Node, typ reflect.Type, prefix string) error {
+	if node.Kind != yaml.MappingNode {
+		if prefix == "" {
+			return errors.New("config must be a mapping")
+		}
+		return fmt.Errorf("config field %q must be a mapping", prefix)
+	}
+
+	values := make(map[string]*yaml.Node, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		values[node.Content[i].Value] = node.Content[i+1]
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		value, ok := values[name]
+		if !ok {
+			return fmt.Errorf("missing required config field %q", path)
+		}
+		fieldType := field.Type
+		if fieldType.Kind() == reflect.Pointer {
+			if value.Tag == "!!null" {
+				continue
+			}
+			fieldType = fieldType.Elem()
+		}
+		if fieldType.Kind() == reflect.Struct {
+			if err := requireStructFields(value, fieldType, path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func writeDefaultConfig(path string, cfg Config) error {
@@ -141,90 +167,7 @@ func defaultConfig() Config {
 		DocumentStore:         "sqlite",
 		SQLitePath:            "document-archive.db",
 		DeletedSweepInterval:  24 * time.Hour,
+		AllowCORS:             []string{},
+		Roles:                 map[string]Role{},
 	}
-}
-
-func applyFileConfig(cfg *Config, fileCfg fileConfig) error {
-	if fileCfg.Addr != nil {
-		cfg.Addr = *fileCfg.Addr
-	}
-	if fileCfg.LogLevel != nil {
-		cfg.LogLevel = parseLogLevel(*fileCfg.LogLevel)
-	}
-	if fileCfg.DefaultStorageBackend != nil {
-		cfg.DefaultStorageBackend = parseStorageName(*fileCfg.DefaultStorageBackend)
-	}
-	if fileCfg.DocumentStore != nil {
-		cfg.DocumentStore = strings.ToLower(strings.TrimSpace(*fileCfg.DocumentStore))
-	}
-	if fileCfg.SQLitePath != nil {
-		cfg.SQLitePath = *fileCfg.SQLitePath
-	}
-	if fileCfg.DeletedSweepInterval != nil {
-		interval, err := parseDuration(*fileCfg.DeletedSweepInterval)
-		if err != nil {
-			return fmt.Errorf("parse deleted_sweep_interval: %w", err)
-		}
-		cfg.DeletedSweepInterval = interval
-	}
-	if fileCfg.AllowCORS != nil {
-		cfg.AllowCORS = append([]string(nil), fileCfg.AllowCORS...)
-	}
-	if fileCfg.S3.Endpoint != nil {
-		cfg.S3.Endpoint = *fileCfg.S3.Endpoint
-	}
-	if fileCfg.S3.Bucket != nil {
-		cfg.S3.Bucket = *fileCfg.S3.Bucket
-	}
-	if fileCfg.S3.Region != nil {
-		cfg.S3.Region = *fileCfg.S3.Region
-	}
-	if fileCfg.S3.AccessKeyID != nil {
-		cfg.S3.AccessKeyID = *fileCfg.S3.AccessKeyID
-	}
-	if fileCfg.S3.SecretAccessKey != nil {
-		cfg.S3.SecretAccessKey = *fileCfg.S3.SecretAccessKey
-	}
-	if fileCfg.S3.SessionToken != nil {
-		cfg.S3.SessionToken = *fileCfg.S3.SessionToken
-	}
-	if fileCfg.S3.UsePathStyle != nil {
-		cfg.S3.UsePathStyle = *fileCfg.S3.UsePathStyle
-	}
-	if fileCfg.Roles != nil {
-		cfg.Roles = make(map[string]Role, len(fileCfg.Roles))
-		for token, role := range fileCfg.Roles {
-			role.Permissions = append([]Permissions(nil), role.Permissions...)
-			cfg.Roles[token] = role
-		}
-	}
-	return nil
-}
-
-func parseStorageName(raw string) storage.StorageName {
-	return storage.StorageName(strings.ToLower(strings.TrimSpace(raw)))
-}
-
-func parseLogLevel(raw string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
-func parseDuration(raw string) (time.Duration, error) {
-	value, err := time.ParseDuration(strings.TrimSpace(raw))
-	if err != nil {
-		return 0, err
-	}
-	if value < 0 {
-		return 0, errors.New("duration must not be negative")
-	}
-	return value, nil
 }

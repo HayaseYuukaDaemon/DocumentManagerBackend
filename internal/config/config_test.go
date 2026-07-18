@@ -6,10 +6,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"document-archive/internal/storage"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadCreatesAndUsesDefaultsWithoutConfigFile(t *testing.T) {
@@ -41,8 +44,8 @@ func TestLoadCreatesAndUsesDefaultsWithoutConfigFile(t *testing.T) {
 	if len(cfg.AllowCORS) != 0 {
 		t.Fatalf("allow_cors should default to empty, got %#v", cfg.AllowCORS)
 	}
-	if cfg.S3.UsePathStyle {
-		t.Fatalf("s3 use path style should default to false")
+	if cfg.S3 != nil {
+		t.Fatalf("s3 should default to nil, got %#v", cfg.S3)
 	}
 
 	info, err := os.Stat(filepath.Join(dir, configFileName))
@@ -75,6 +78,7 @@ allow_cors:
   - "http://localhost:5173"
   - "https://example.com"
 s3:
+  internal_endpoint: "http://minio:9000"
   endpoint: "http://127.0.0.1:9000"
   bucket: "archive"
   region: "us-east-1"
@@ -119,8 +123,14 @@ role:
 	if !slices.Equal(cfg.AllowCORS, []string{"http://localhost:5173", "https://example.com"}) {
 		t.Fatalf("unexpected allow_cors: %#v", cfg.AllowCORS)
 	}
+	if cfg.S3 == nil {
+		t.Fatal("s3 config should be loaded")
+	}
 	if cfg.S3.Endpoint != "http://127.0.0.1:9000" || cfg.S3.Bucket != "archive" || cfg.S3.Region != "us-east-1" {
 		t.Fatalf("unexpected s3 endpoint/bucket/region: %#v", cfg)
+	}
+	if cfg.S3.InternalEndpoint != "http://minio:9000" {
+		t.Fatalf("unexpected s3 internal endpoint: %q", cfg.S3.InternalEndpoint)
 	}
 	if cfg.S3.AccessKeyID != "config-key" || cfg.S3.SecretAccessKey != "config-secret" || cfg.S3.SessionToken != "config-session" {
 		t.Fatalf("unexpected s3 credentials: %#v", cfg)
@@ -149,11 +159,10 @@ role:
 
 func TestLoadIgnoresEnvironment(t *testing.T) {
 	dir := chdirTemp(t)
-	writeConfigFile(t, dir, `
-addr: ":9090"
-s3:
-  use_path_style: true
-`)
+	want := defaultConfig()
+	want.Addr = ":9090"
+	want.S3 = &storage.S3Config{UsePathStyle: true}
+	writeCompleteConfig(t, dir, want)
 	t.Setenv("ARCHIVE_ADDR", ":7070")
 	t.Setenv("ARCHIVE_S3_USE_PATH_STYLE", "false")
 
@@ -168,19 +177,19 @@ s3:
 	if !cfg.S3.UsePathStyle {
 		t.Fatalf("env should not override config bool")
 	}
-	if cfg.DefaultStorageBackend != storage.MemoryStorageName || cfg.DocumentStore != "sqlite" {
-		t.Fatalf("partial config should retain defaults: %#v", cfg)
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatalf("environment should not change config: got %#v, want %#v", cfg, want)
 	}
 }
 
 func TestLoadNormalizesConfigValues(t *testing.T) {
 	dir := chdirTemp(t)
-	writeConfigFile(t, dir, `
-log_level: "warning"
-default_storage: " S3 "
-document_store: " MEMORY "
-deleted_sweep_interval: "30m"
-`)
+	want := defaultConfig()
+	want.LogLevel = slog.LevelWarn
+	want.DefaultStorageBackend = " S3 "
+	want.DocumentStore = " MEMORY "
+	want.DeletedSweepInterval = 30 * time.Minute
+	writeCompleteConfig(t, dir, want)
 
 	cfg, err := Load()
 	if err != nil {
@@ -222,11 +231,52 @@ func TestLoadReturnsErrorForInvalidDeletedSweepInterval(t *testing.T) {
 
 func TestLoadReturnsErrorForNegativeDeletedSweepInterval(t *testing.T) {
 	dir := chdirTemp(t)
-	writeConfigFile(t, dir, "deleted_sweep_interval: -1s")
+	cfg := defaultConfig()
+	cfg.DeletedSweepInterval = -time.Second
+	writeCompleteConfig(t, dir, cfg)
 
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("Load should return error for negative deleted_sweep_interval")
+	}
+}
+
+func TestLoadReturnsErrorForMissingConfigField(t *testing.T) {
+	dir := chdirTemp(t)
+	cfg := defaultConfig()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	content := removeYAMLField(t, string(data), "allow_cors")
+	writeConfigFile(t, dir, content)
+
+	_, err = Load()
+	if err == nil {
+		t.Fatalf("Load should return error for missing config field")
+	}
+	if !strings.Contains(err.Error(), "allow_cors") {
+		t.Fatalf("unexpected missing field error: %v", err)
+	}
+}
+
+func TestLoadReturnsErrorForMissingS3ConfigField(t *testing.T) {
+	dir := chdirTemp(t)
+	cfg := defaultConfig()
+	cfg.S3 = &storage.S3Config{}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	content := removeYAMLField(t, string(data), "internal_endpoint")
+	writeConfigFile(t, dir, content)
+
+	_, err = Load()
+	if err == nil {
+		t.Fatalf("Load should return error for missing s3 config field")
+	}
+	if !strings.Contains(err.Error(), "s3.internal_endpoint") {
+		t.Fatalf("unexpected missing field error: %v", err)
 	}
 }
 
@@ -266,4 +316,26 @@ func writeConfigFile(t *testing.T, dir string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+}
+
+func writeCompleteConfig(t *testing.T, dir string, cfg Config) {
+	t.Helper()
+
+	path := filepath.Join(dir, configFileName)
+	if err := writeDefaultConfig(path, cfg); err != nil {
+		t.Fatalf("writeDefaultConfig returned error: %v", err)
+	}
+}
+
+func removeYAMLField(t *testing.T, content string, name string) string {
+	t.Helper()
+
+	lines := strings.SplitAfter(content, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), name+":") {
+			return strings.Join(append(lines[:i], lines[i+1:]...), "")
+		}
+	}
+	t.Fatalf("field %q not found in YAML", name)
+	return ""
 }

@@ -6,6 +6,7 @@ sqlite_path: "document-archive.db"
 deleted_sweep_interval: "24h"
 allow_cors: []
 s3:
+  internal_endpoint: ""
   endpoint: ""
   bucket: ""
   region: "us-east-1"
