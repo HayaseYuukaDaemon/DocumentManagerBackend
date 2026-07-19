@@ -98,8 +98,11 @@ func processAuth(cfg PreprocessConfig, w http.ResponseWriter, r *http.Request) b
 	header := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(header, "Bearer ")
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return true
+		token = r.URL.Query().Get("token")
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return true
+		}
 	}
 	role, ok := cfg.Config.Roles[token]
 	if !ok {
