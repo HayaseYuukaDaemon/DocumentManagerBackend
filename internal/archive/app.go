@@ -154,7 +154,7 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}
-	query, err := qb.OrderBy(input.OrderBy).Order(input.Order).Limit(input.Limit).Build()
+	query, err := qb.OrderBy(input.OrderBy).Order(input.Order).Limit(input.Limit).Offset(input.Offset).Build()
 	if err != nil {
 		return nil, err
 	}

@@ -153,6 +153,7 @@ type QueryInput struct {
 	Limit   int             `json:"limit,omitempty"`
 	OrderBy string          `json:"orderby,omitempty"`
 	Order   string          `json:"order,omitempty"`
+	Offset  int             `json:"offset,omitempty"`
 }
 
 type ErrQueryParamMismatch struct {

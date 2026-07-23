@@ -241,6 +241,13 @@ func (s *SQLiteStore) query(ctx context.Context, query DocumentQuery, tx *sql.Tx
 	if query.limit > 0 {
 		sqlQuery += " LIMIT ?"
 		args = append(args, query.limit)
+	} else {
+		sqlQuery += " LIMIT -1"
+	}
+
+	if query.offset > 0 {
+		sqlQuery += " OFFSET ?"
+		args = append(args, query.offset)
 	}
 
 	rows, err := tx.QueryContext(ctx, sqlQuery, args...)

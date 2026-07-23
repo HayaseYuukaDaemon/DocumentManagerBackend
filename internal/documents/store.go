@@ -69,6 +69,7 @@ type QueryBuilder struct {
 
 	orderBy string // 比如ORDER BY ID, 这里填ID
 	order   string // 比如ASC/DESC, 这里填ASC/DESC
+	offset  int    // 比如LIMIT 10 OFFSET 20, 默认是0
 	limit   int
 }
 
@@ -80,6 +81,11 @@ func (qb QueryBuilder) BySourceDocumentID(source sources.SourceType, sourceDocum
 
 func (qb QueryBuilder) ByStatus(status DocumentStatus) QueryBuilder {
 	qb.status = &status
+	return qb
+}
+
+func (qb QueryBuilder) Offset(offset int) QueryBuilder {
+	qb.offset = offset
 	return qb
 }
 
@@ -286,6 +292,12 @@ func (s *MemoryStore) Query(ctx context.Context, query DocumentQuery) ([]Documen
 		}
 		return cmp < 0
 	})
+
+	if query.offset > 0 && query.offset < len(result) {
+		result = result[query.offset:]
+	} else if query.offset >= len(result) {
+		result = []Document{}
+	}
 
 	if query.limit > 0 && len(result) > query.limit {
 		result = result[:query.limit]
