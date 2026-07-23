@@ -136,6 +136,7 @@ const (
 	QueryBySourceDocumentID QueryMode = "by_source_document_id"
 	QueryByRequestTime      QueryMode = "by_request_time"
 	QueryByStatus           QueryMode = "by_status"
+	QueryAll                QueryMode = "all"
 )
 
 type RefreshMode string
@@ -152,15 +153,6 @@ type QueryInput struct {
 	Limit   int             `json:"limit,omitempty"`
 	OrderBy string          `json:"orderby,omitempty"`
 	Order   string          `json:"order,omitempty"`
-}
-
-type QueryByStatusParams struct {
-	Status DocumentStatus `json:"status"`
-}
-
-type QueryBySourceDocumentIDParams struct {
-	Source           sources.SourceType `json:"source"`
-	SourceDocumentID string             `json:"source_document_id"`
 }
 
 type ErrQueryParamMismatch struct {

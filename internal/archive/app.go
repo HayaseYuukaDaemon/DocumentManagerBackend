@@ -132,18 +132,25 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 	qb := documents.QueryBuilder{}
 	switch input.Mode {
 	case documents.QueryBySourceDocumentID:
-		var params documents.QueryBySourceDocumentIDParams
+		var params struct {
+			Source           sources.SourceType `json:"source"`
+			SourceDocumentID string             `json:"source_document_id"`
+		}
 		if err := json.Unmarshal(input.Params, &params); err != nil {
 			return nil, fmt.Errorf("decode query params: %w", err)
 		}
 		qb = qb.BySourceDocumentID(params.Source, params.SourceDocumentID)
 
 	case documents.QueryByStatus:
-		var params documents.QueryByStatusParams
+		var params struct {
+			Status documents.DocumentStatus `json:"status"`
+		}
 		if err := json.Unmarshal(input.Params, &params); err != nil {
 			return nil, fmt.Errorf("decode query params: %w", err)
 		}
 		qb = qb.ByStatus(params.Status)
+	case documents.QueryAll:
+		// No additional filtering needed for QueryAll
 	default:
 		return nil, fmt.Errorf("unsupported query mode: %s", input.Mode)
 	}
