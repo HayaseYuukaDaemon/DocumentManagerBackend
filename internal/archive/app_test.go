@@ -25,32 +25,47 @@ type fakeObjectStore struct {
 	failPrefixes    map[string]error
 }
 
-type fakeSourceHandler struct {
-	resolved         documents.Document
-	downloads        int
-	pageDownloadHook func(ctx context.Context, documentID int, page documents.Page) error
+type fakeSourceFactory struct {
+	resolved  documents.Document
+	downloads int
+	handlers  int
 }
 
-func (h *fakeSourceHandler) Source() sources.SourceType {
+type fakeSourceHandler struct {
+	factory          *fakeSourceFactory
+	objects          storage.ObjectStore
+	pageDownloadHook PageDownloadHook
+}
+
+func (f *fakeSourceFactory) Source() sources.SourceType {
 	return testSourceType
 }
 
-func (h *fakeSourceHandler) ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
-	return h.resolved, nil
+func (f *fakeSourceFactory) NewHandler(objects storage.ObjectStore, hook PageDownloadHook) SourceHandler {
+	f.handlers++
+	return &fakeSourceHandler{
+		factory:          f,
+		objects:          objects,
+		pageDownloadHook: hook,
+	}
 }
 
-func (h *fakeSourceHandler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
-	pages := make([]documents.Page, 0, len(h.resolved.Pages))
-	for index, resolvedPage := range h.resolved.Pages {
+func (h *fakeSourceHandler) ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
+	return h.factory.resolved, nil
+}
+
+func (h *fakeSourceHandler) ArchiveContent(ctx context.Context, document documents.Document) ([]documents.Page, error) {
+	pages := make([]documents.Page, 0, len(h.factory.resolved.Pages))
+	for index, resolvedPage := range h.factory.resolved.Pages {
 		key, err := PageObjectKey(strconv.Itoa(document.ID), resolvedPage.Hash, resolvedPage.ContentType)
 		if err != nil {
 			return pages, err
 		}
-		info, err := objects.HeadObject(ctx, key)
+		info, err := h.objects.HeadObject(ctx, key)
 		if errors.Is(err, storage.ErrObjectNotFound) {
-			h.downloads++
+			h.factory.downloads++
 			body := "page-" + resolvedPage.Hash
-			info, err = objects.PutObject(ctx, storage.ObjectInfo{
+			info, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 				Key:         key,
 				Size:        int64(len(body)),
 				ContentType: resolvedPage.ContentType,
@@ -77,22 +92,17 @@ func (h *fakeSourceHandler) ArchiveContent(ctx context.Context, document documen
 	return pages, nil
 }
 
-func (h *fakeSourceHandler) ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
+func (h *fakeSourceHandler) ArchiveManifest(ctx context.Context, document documents.Document) error {
 	body, err := json.Marshal(document)
 	if err != nil {
 		return err
 	}
-	_, err = objects.PutObject(ctx, storage.ObjectInfo{
+	_, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 		Key:         ManifestObjectKey(strconv.Itoa(document.ID)),
 		Size:        int64(len(body)),
 		ContentType: "application/json",
 	}, strings.NewReader(string(body)))
 	return err
-}
-
-func (h *fakeSourceHandler) RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error {
-	h.pageDownloadHook = hook
-	return nil
 }
 
 func (s *fakeObjectStore) StorageName() storage.StorageName {
@@ -125,6 +135,16 @@ func (s *fakeObjectStore) DeletePrefix(ctx context.Context, prefix string) error
 
 func (s *fakeObjectStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	return "", storage.ErrNotImplemented
+}
+
+func TestRegisterSourceFactoryRejectsDuplicateSource(t *testing.T) {
+	app := NewApp(documents.NewMemoryStore(), discardLogger(), storage.MemoryStorageName, 24*time.Hour)
+	if err := app.RegisterSourceFactory(&fakeSourceFactory{}); err != nil {
+		t.Fatalf("first RegisterSourceFactory returned error: %v", err)
+	}
+	if err := app.RegisterSourceFactory(&fakeSourceFactory{}); err == nil {
+		t.Fatal("duplicate RegisterSourceFactory returned nil error")
+	}
 }
 
 func TestProcessDeletedPurgesDocumentAndDeletesObjectPrefix(t *testing.T) {
@@ -198,7 +218,7 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 	ctx := context.Background()
 	documentStore := documents.NewMemoryStore()
 	objects := storage.NewMemoryStore()
-	handler := &fakeSourceHandler{resolved: documents.Document{
+	factory := &fakeSourceFactory{resolved: documents.Document{
 		SourceMeta: json.RawMessage(`{"source":"resolved"}`),
 		Title:      "resolved title",
 		Pages: []documents.Page{{
@@ -208,8 +228,8 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 		}},
 	}}
 	app := NewApp(documentStore, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
-	if err := app.RegisterSource(handler); err != nil {
-		t.Fatalf("RegisterSource returned error: %v", err)
+	if err := app.RegisterSourceFactory(factory); err != nil {
+		t.Fatalf("RegisterSourceFactory returned error: %v", err)
 	}
 	app.RegisterStorage(objects)
 
@@ -219,6 +239,9 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 	})
 	if err != nil {
 		t.Fatalf("RequestDocument returned error: %v", err)
+	}
+	if factory.handlers != 0 {
+		t.Fatalf("request stage created %d handlers, want 0", factory.handlers)
 	}
 	archived, err := app.processDocument(ctx, doc.ID)
 	if err != nil {
@@ -230,8 +253,8 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 	if len(archived.Pages) != 1 || archived.Pages[0].Hash != "hash-a" {
 		t.Fatalf("unexpected archived pages: %#v", archived.Pages)
 	}
-	if handler.downloads != 1 {
-		t.Fatalf("expected initial archive to download once, got %d", handler.downloads)
+	if factory.downloads != 1 {
+		t.Fatalf("expected initial archive to download once, got %d", factory.downloads)
 	}
 
 	snapshot, err := objects.GetObject(ctx, ManifestObjectKey(strconv.Itoa(doc.ID)))
@@ -273,8 +296,11 @@ func TestProcessDocumentRefreshRebuildsPagesFromHashAddressedObjects(t *testing.
 	if err != nil {
 		t.Fatalf("processDocument after refresh returned error: %v", err)
 	}
-	if handler.downloads != 1 {
-		t.Fatalf("refresh should reuse existing object, got %d total downloads", handler.downloads)
+	if factory.downloads != 1 {
+		t.Fatalf("refresh should reuse existing object, got %d total downloads", factory.downloads)
+	}
+	if factory.handlers != 2 {
+		t.Fatalf("archive runs created %d handlers, want 2", factory.handlers)
 	}
 	if rearchived.Progress.Done != 1 || len(rearchived.Pages) != 1 || rearchived.Pages[0].Key != pageKey {
 		t.Fatalf("refresh did not rebuild page metadata: %#v", rearchived)
@@ -310,7 +336,7 @@ func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
 	ctx := context.Background()
 	documentStore := documents.NewMemoryStore()
 	objects := storage.NewMemoryStore()
-	handler := &fakeSourceHandler{resolved: documents.Document{
+	factory := &fakeSourceFactory{resolved: documents.Document{
 		SourceMeta: json.RawMessage(`{"source":"resolved"}`),
 		Title:      "resolved title",
 		Pages: []documents.Page{
@@ -319,8 +345,8 @@ func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
 		},
 	}}
 	app := NewApp(documentStore, discardLogger(), storage.MemoryStorageName, 24*time.Hour)
-	if err := app.RegisterSource(handler); err != nil {
-		t.Fatalf("RegisterSource returned error: %v", err)
+	if err := app.RegisterSourceFactory(factory); err != nil {
+		t.Fatalf("RegisterSourceFactory returned error: %v", err)
 	}
 	app.RegisterStorage(objects)
 
@@ -375,8 +401,8 @@ func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
 	if len(archived.Pages) != 2 || archived.Pages[0].Hash != "hash-a" || archived.Pages[1].Hash != "hash-b" {
 		t.Fatalf("unexpected rebuilt pages: %#v", archived.Pages)
 	}
-	if handler.downloads != 1 {
-		t.Fatalf("expected cached page reuse and one new download, got %d downloads", handler.downloads)
+	if factory.downloads != 1 {
+		t.Fatalf("expected cached page reuse and one new download, got %d downloads", factory.downloads)
 	}
 }
 

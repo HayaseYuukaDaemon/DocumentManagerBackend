@@ -40,19 +40,19 @@ func main() {
 	defer closeDocumentStore()
 
 	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend, cfg.DeletedSweepInterval)
-	err = archiveApp.RegisterSource(hitomi.NewHandler())
+	err = archiveApp.RegisterSourceFactory(hitomi.NewFactory())
 	if err != nil {
-		logger.Error("failed to register source", "error", err, "source", hitomi.SourceTypeHitomi)
+		logger.Error("failed to register source factory", "error", err, "source", hitomi.SourceTypeHitomi)
 		os.Exit(1)
 	}
-	jh, err := jmcomic.NewHandler()
+	jf, err := jmcomic.NewFactory()
 	if err != nil {
-		logger.Error("failed to create jmcomic handler", "error", err)
+		logger.Error("failed to create jmcomic handler factory", "error", err)
 		os.Exit(1)
 	}
-	err = archiveApp.RegisterSource(jh)
+	err = archiveApp.RegisterSourceFactory(jf)
 	if err != nil {
-		logger.Error("failed to register source", "error", err, "source", jmcomic.SourceTypeJmcomic)
+		logger.Error("failed to register source factory", "error", err, "source", jmcomic.SourceTypeJmcomic)
 		os.Exit(1)
 	}
 	if err := registerObjectStores(archiveApp, cfg, logger); err != nil {

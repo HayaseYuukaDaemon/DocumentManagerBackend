@@ -10,12 +10,32 @@ import (
 	"testing"
 
 	"document-archive/internal/documents"
+	"document-archive/internal/storage"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+func TestFactoryCreatesHandlersWithSharedClient(t *testing.T) {
+	client := &ApiClient{}
+	factory := &Factory{client: client}
+	objects1 := storage.NewMemoryStore()
+	objects2 := storage.NewMemoryStore()
+
+	handler1 := factory.NewHandler(objects1, nil).(*Handler)
+	handler2 := factory.NewHandler(objects2, nil).(*Handler)
+	if handler1 == handler2 {
+		t.Fatal("factory returned the same handler instance")
+	}
+	if handler1.objects != objects1 || handler2.objects != objects2 {
+		t.Fatal("handlers were not bound to their object stores")
+	}
+	if handler1.client != client || handler2.client != client {
+		t.Fatal("handlers do not share factory client")
+	}
 }
 
 func TestResolveDocumentRejectsMultiChapterAlbumBeforeFetchingPhoto(t *testing.T) {

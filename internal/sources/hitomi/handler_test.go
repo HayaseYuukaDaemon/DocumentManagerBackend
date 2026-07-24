@@ -13,36 +13,25 @@ import (
 	"time"
 
 	"document-archive/internal/documents"
+	"document-archive/internal/sources"
 	"document-archive/internal/storage"
 )
 
-func TestConcurrencySchedulerAppliesRateLimitOncePerGeneration(t *testing.T) {
-	scheduler := NewConcurrencyScheduler(4, 8)
-	scheduler.initialBackoff = 10 * time.Millisecond
-	scheduler.maxBackoff = 20 * time.Millisecond
+func TestFactoryCreatesHandlersWithSharedRuntime(t *testing.T) {
+	factory := NewFactory()
+	objects1 := storage.NewMemoryStore()
+	objects2 := storage.NewMemoryStore()
 
-	permits := make([]schedulerPermit, 4)
-	for index := range permits {
-		permit, err := scheduler.acquire(context.Background())
-		if err != nil {
-			t.Fatalf("acquire permit %d: %v", index, err)
-		}
-		permits[index] = permit
+	handler1 := factory.NewHandler(objects1, nil).(*Handler)
+	handler2 := factory.NewHandler(objects2, nil).(*Handler)
+	if handler1 == handler2 {
+		t.Fatal("factory returned the same handler instance")
 	}
-
-	rateLimitErr := &HitomiRateLimitError{StatusCode: http.StatusServiceUnavailable}
-	for _, permit := range permits {
-		scheduler.finish(permit, rateLimitErr)
+	if handler1.objects != objects1 || handler2.objects != objects2 {
+		t.Fatal("handlers were not bound to their object stores")
 	}
-
-	if scheduler.generation != 1 {
-		t.Fatalf("generation = %d, want 1", scheduler.generation)
-	}
-	if scheduler.limit != 2 {
-		t.Fatalf("limit = %d, want 2", scheduler.limit)
-	}
-	if scheduler.backoff != 10*time.Millisecond {
-		t.Fatalf("backoff = %s, want 10ms", scheduler.backoff)
+	if handler1.resolver != handler2.resolver || handler1.scheduler != handler2.scheduler {
+		t.Fatal("handlers do not share factory runtime")
 	}
 }
 
@@ -54,8 +43,8 @@ func TestResolverDownloadPageReturnsRateLimitImmediately(t *testing.T) {
 	})})
 
 	err := resolver.DownloadPage(context.Background(), DownloadPage{URL: "https://example.test/page.webp"}, io.Discard)
-	if !errors.Is(err, ErrHitomiRateLimited) {
-		t.Fatalf("DownloadPage error = %v, want ErrHitomiRateLimited", err)
+	if !errors.Is(err, sources.ErrRateLimited) {
+		t.Fatalf("DownloadPage error = %v, want sources.ErrRateLimited", err)
 	}
 	var rateLimitErr *HitomiRateLimitError
 	if !errors.As(err, &rateLimitErr) {
@@ -107,25 +96,23 @@ func TestArchiveContentDownloadsPagesConcurrently(t *testing.T) {
 		t.Fatalf("marshal metadata: %v", err)
 	}
 
-	handler := &Handler{
+	factory := &Factory{
 		resolver:  NewResolver(client),
-		scheduler: NewConcurrencyScheduler(2, 3),
+		scheduler: sources.NewConcurrencyScheduler(2, 3),
 	}
 	var recordedMu sync.Mutex
 	recorded := make([]documents.Page, 0, len(files))
-	if err := handler.RegisterPageDownloadHook(func(_ context.Context, _ int, page documents.Page) error {
+	handler := factory.NewHandler(storage.NewMemoryStore(), func(_ context.Context, _ int, page documents.Page) error {
 		recordedMu.Lock()
 		defer recordedMu.Unlock()
 		recorded = append(recorded, page)
 		return nil
-	}); err != nil {
-		t.Fatalf("register page hook: %v", err)
-	}
+	})
 
 	pages, err := handler.ArchiveContent(context.Background(), documents.Document{
 		ID:         7,
 		SourceMeta: metadata,
-	}, storage.NewMemoryStore())
+	})
 	if err != nil {
 		t.Fatalf("ArchiveContent: %v", err)
 	}

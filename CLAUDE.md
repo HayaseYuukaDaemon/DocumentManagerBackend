@@ -15,11 +15,12 @@
 
 配置示例见 [internal/config/config.demo.yml](internal/config/config.demo.yml)。
 
-## 开发阶段原则
+## 生产阶段原则
 
-- 项目仍处于极早期开发阶段，尚未应用于生产环境；可以接受破坏性变更。
-- 优先保持架构、数据模型和实现简单易懂；除非明确要求，不要为旧数据库、旧 API 或旧行为添加兼容迁移/兼容层。
-- 如果 schema 或接口变更能明显提升简洁性和易用性，直接修改目标结构即可，不需要保留历史包袱。
+- 项目已经投入生产使用。默认应保护现有数据库、HTTP API、配置格式和运行行为，不能再以早期开发阶段为由自行实施破坏性变更。
+- 破坏性变更并非禁止；如果 schema、接口、配置或行为调整能够明显简化实现、改善架构或提升健壮性，应主动提出方案。
+- 实施任何破坏性变更前，必须先与用户讨论具体收益、影响范围、数据迁移、兼容策略和回滚方式，并获得明确确认；未经确认只能分析和提出建议，不能直接修改实现。
+- 用户确认破坏性方案后，按讨论结果实施，不要自行增加未约定的兼容层，也不要省略已约定的迁移或过渡措施。
 - 以 SQLite 实现作为语义基准；内存实现和测试应尽量向 SQLite 行为对齐，即使内部实现较朴素也可以。
 - 该后端服务面向授权请求。已通过授权的请求应被视为合法控制面请求；如果调用方显式指定状态、查询范围等参数，除非参数本身完全违背软件工程约束或会破坏内部不变量，否则应尊重请求语义。例如授权请求显式查询 `deleted` / `purged` 状态时，应返回对应文档，而不是因为它们不属于常规读取结果就额外隐藏。
 
@@ -27,19 +28,19 @@
 
 这是 ComicManager 的 Go HTTP 归档/采集服务。它负责按来源执行下载与归档流程，并维护文档元数据；页面和 manifest 等二进制对象通过对象存储接口抽象出去。
 
-- [cmd/server/main.go](cmd/server/main.go) 负责服务装配：读取 `config.yml`、创建文档存储、注册 Hitomi 来源处理器和内存对象存储、按配置注册 S3-compatible 对象存储、启动归档 worker，然后启动 HTTP 服务。
+- [cmd/server/main.go](cmd/server/main.go) 负责服务装配：读取 `config.yml`、创建文档存储、注册 Hitomi/JMComic 来源工厂和内存对象存储、按配置注册 S3-compatible 对象存储、启动归档 worker，然后启动 HTTP 服务。
 - [internal/config/](internal/config/) 读取配置。优先级为默认值 < `config.yml`；不读取环境变量。默认值包括 `addr=:8080`、`document_store=sqlite`、`sqlite_path=document-archive.db`、`default_storage=memory`、`deleted_sweep_interval=24h`、`allow_cors=[]`。设置 `auth_token` 后会启用 Bearer Token 鉴权。
 - [internal/httpapi/](internal/httpapi/) 是 HTTP 层。它使用 Go 的 `http.ServeMux` 路由模式，并把业务操作委托给 `archive.App`。所有 `/v1/...` 业务路由在配置 token 后都会经过鉴权；`/healthz` 是公开接口。CORS 作为 mux 外层 middleware 统一处理，`allow_cors` 为空时不启用 CORS，非空时按显式 Origin 白名单或 `"*"` 匹配，预检请求会在鉴权前返回。
-- [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源处理器和对象存储。`RunWorker` 每秒轮询 queued 文档，解析元数据、下载或复用内容、通过页面下载 hook 写入页面更新，并在启动时及 `deleted_sweep_interval` 周期上扫描 `deleted` 文档，只有在文档对象前缀清理成功后才推进为 `purged`。
+- [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源工厂和对象存储。`RunWorker` 每秒轮询 queued 文档；处理单个文档时根据来源取得工厂、根据 `storage_backend` 取得对象存储，再创建绑定对象存储和页面 hook 的任务级 handler。worker 还会在启动时及 `deleted_sweep_interval` 周期上扫描 `deleted` 文档，只有在文档对象前缀清理成功后才推进为 `purged`。
 - [internal/documents/](internal/documents/) 定义公开文档模型和 store 接口。当前有两个实现：[internal/documents/store.go](internal/documents/store.go) 中的内存存储，以及 [internal/documents/sqlite_store.go](internal/documents/sqlite_store.go) 中的 SQLite 存储。SQLite 存储把文档和页面放在两张表中，使用 `document_status` 表达完整文档状态，并按全局唯一模型对 `(source, source_document_id)` 组合保持唯一约束。
 - [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。当前实现包括 `MemoryStore` 和 S3-compatible `S3Store`。memory 对象保存在进程内存中，S3 对象通过 AWS SDK v2 访问，可配置 endpoint、bucket、region、credentials 和 path-style 行为。
-- [internal/sources/](internal/sources/) 包含来源抽象。[internal/sources/hitomi/](internal/sources/hitomi/) 是当前的 Hitomi handler/resolver：获取图库元数据、解析页面下载 URL、下载页面、写入对象，并向 archive app 发出页面更新。
+- [internal/sources/](internal/sources/) 包含来源抽象和公共 `ConcurrencyScheduler`；来源可通过 `ErrRateLimited` 及可选的 `RateLimitError` 退避时间向调度器反馈限流。每个来源工厂是 App 生命周期内的共享实例，持有 HTTP client、resolver、调度器等长期状态，并为每次归档创建短期 handler。[internal/sources/hitomi/](internal/sources/hitomi/) 的工厂共享 resolver 和公共限流调度器，任务级 handler 负责解析页面、下载或复用对象并发出页面更新。
 
 ## 请求流程
 
 1. `POST /v1/documents/request` 通过 `archive.App.RequestDocument` 创建 `queued` 文档。
 2. 后台 worker 通过显式 `queued` 状态查询获取待处理文档并逐个处理。
-3. 处理时先通过 `TransitionTo` 把状态设为 `resolving`，调用来源 handler 的 `ResolveDocument` 返回补充了来源元数据、标题和页面描述的 `Document`，并根据页数写入 `Progress.Total`。
+3. 处理时 archive app 通过来源工厂创建绑定当前对象存储和页面 hook 的任务级 handler，再通过 `TransitionTo` 把状态设为 `resolving`，调用 `ResolveDocument` 返回补充了来源元数据、标题和页面描述的 `Document`，并根据页数写入 `Progress.Total`。
 4. 文档在 `Progress.Done < Progress.Total` 时会继续进入 `downloading`。进入内容处理前，archive app 调用 `Store.ResetPages` 清空当前页面元数据和 `Done`，然后以 OSS 为内容真相重建页面。页面对象 key 由 `document_id + hash` 确定；来源 handler 先通过 `HeadObject` 查询 OSS，命中时直接 `AddPage`，未命中时按 `PutObject -> AddPage` 的顺序下载并记录页面。
 5. 内容处理完成后，archive app 从 Store 重新读取最新 `Document`，交给来源 handler 的 `ArchiveManifest` 写入 `manifest.json` 对象，再将状态变为 `archived`。失败时状态变为 `failed`，并记录错误信息。
 6. 删除文档时状态变为 `deleted`；维护任务会在启动时补扫一次并在 `deleted_sweep_interval` 周期上继续扫描，按 `documents/{document_id}/` 前缀清理当前和历史对象成功后再推进为 `purged`。

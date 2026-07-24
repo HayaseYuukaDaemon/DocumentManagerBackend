@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"document-archive/internal/sources"
+
 	"github.com/maruel/natural"
 )
 
@@ -23,7 +25,6 @@ const (
 )
 
 var ErrComicNotFound = errors.New("hitomi comic not found")
-var ErrHitomiRateLimited = errors.New("hitomi rate limited")
 
 type HitomiRateLimitError struct {
 	URL        string
@@ -32,11 +33,15 @@ type HitomiRateLimitError struct {
 }
 
 func (e *HitomiRateLimitError) Error() string {
-	return fmt.Sprintf("GET %s returned %d: %v", e.URL, e.StatusCode, ErrHitomiRateLimited)
+	return fmt.Sprintf("GET %s returned %d: %v", e.URL, e.StatusCode, sources.ErrRateLimited)
 }
 
 func (e *HitomiRateLimitError) Unwrap() error {
-	return ErrHitomiRateLimited
+	return sources.ErrRateLimited
+}
+
+func (e *HitomiRateLimitError) RetryAfterDuration() time.Duration {
+	return e.RetryAfter
 }
 
 type Resolver struct {

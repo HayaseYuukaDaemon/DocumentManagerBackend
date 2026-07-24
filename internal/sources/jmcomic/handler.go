@@ -19,10 +19,18 @@ const SourceTypeJmcomic sources.SourceType = "jmcomic"
 
 var ErrMultiChapterAlbum = errors.New("jmcomic multi-chapter albums are not supported")
 
-type Handler struct {
-	client           *ApiClient
-	pageDownloadHook func(ctx context.Context, documentID int, page documents.Page) error
+type Factory struct {
+	client *ApiClient
 }
+
+type Handler struct {
+	objects          storage.ObjectStore
+	client           *ApiClient
+	pageDownloadHook archive.PageDownloadHook
+}
+
+var _ archive.SourceHandlerFactory = (*Factory)(nil)
+var _ archive.SourceHandler = (*Handler)(nil)
 
 type resolvedPage struct {
 	Name        string
@@ -30,16 +38,24 @@ type resolvedPage struct {
 	ContentType string
 }
 
-func NewHandler() (*Handler, error) {
+func NewFactory() (*Factory, error) {
 	client, err := NewAPIClient(10 * time.Second)
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{client: client}, nil
+	return &Factory{client: client}, nil
 }
 
-func (h *Handler) Source() sources.SourceType {
+func (f *Factory) Source() sources.SourceType {
 	return SourceTypeJmcomic
+}
+
+func (f *Factory) NewHandler(objects storage.ObjectStore, hook archive.PageDownloadHook) archive.SourceHandler {
+	return &Handler{
+		objects:          objects,
+		client:           f.client,
+		pageDownloadHook: hook,
+	}
 }
 
 func (h *Handler) ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error) {
@@ -80,7 +96,10 @@ func (h *Handler) ResolveDocument(ctx context.Context, document documents.Docume
 	}, nil
 }
 
-func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
+func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document) ([]documents.Page, error) {
+	if h.objects == nil {
+		return nil, errors.New("object store is required")
+	}
 	photo := Photo{}
 	if err := json.Unmarshal(document.SourceMeta, &photo); err != nil {
 		return nil, fmt.Errorf("decode jmcomic document metadata: %w", err)
@@ -108,7 +127,7 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 			return archivedPages, fmt.Errorf("build page %d object key: %w", index, err)
 		}
 
-		objectInfo, err := objects.HeadObject(ctx, key)
+		objectInfo, err := h.objects.HeadObject(ctx, key)
 		if err == nil {
 			if objectInfo.ETag != "" && objectInfo.ETag != page.Hash {
 				return archivedPages, fmt.Errorf("page %d object hash mismatch: expected %s, got %s", index, page.Hash, objectInfo.ETag)
@@ -139,7 +158,7 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 			return archivedPages, fmt.Errorf("encode jmcomic page %d: %w", index, err)
 		}
 
-		objectInfo, err = objects.PutObject(ctx, storage.ObjectInfo{
+		objectInfo, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 			Key:         key,
 			Size:        int64(body.Len()),
 			ContentType: page.ContentType,
@@ -163,12 +182,15 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 	return archivedPages, nil
 }
 
-func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
+func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Document) error {
+	if h.objects == nil {
+		return errors.New("object store is required")
+	}
 	body, err := json.Marshal(document)
 	if err != nil {
 		return fmt.Errorf("marshal document snapshot: %w", err)
 	}
-	_, err = objects.PutObject(ctx, storage.ObjectInfo{
+	_, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 		Key:         archive.ManifestObjectKey(strconv.Itoa(document.ID)),
 		Size:        int64(len(body)),
 		ContentType: "application/json",
@@ -176,11 +198,6 @@ func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Docume
 	if err != nil {
 		return fmt.Errorf("put document snapshot: %w", err)
 	}
-	return nil
-}
-
-func (h *Handler) RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error {
-	h.pageDownloadHook = hook
 	return nil
 }
 

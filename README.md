@@ -7,6 +7,10 @@
 - Hitomi
 - JMComic（仅支持单章节作品）
 
+## 项目状态
+
+本项目已经投入生产使用。涉及数据库 schema、HTTP API、配置格式或既有运行行为的破坏性变更，需要在实施前明确讨论收益、影响、迁移和回滚方案并获得确认。能够简化实现、改善架构或提升健壮性的破坏性方案仍然欢迎提出。
+
 ## 功能概览
 
 - 基于 `http.ServeMux` 的 HTTP API
@@ -225,8 +229,8 @@ documents/{document_id}/pages/{hash}.{ext}
 ## 项目结构
 
 - `cmd/server/`：服务装配、worker 和 HTTP server 启动。
-- `internal/archive/`：归档流程、刷新、清理和来源/存储注册。
+- `internal/archive/`：归档流程、刷新、清理、来源工厂和存储注册；worker 按文档创建任务级来源 handler。
 - `internal/documents/`：文档模型、状态机以及 memory/SQLite store。
 - `internal/httpapi/`：路由、鉴权、CORS 和响应。
-- `internal/sources/`：Hitomi 与 JMComic 来源实现。
+- `internal/sources/`：来源工厂、handler 及公共自适应并发调度器；工厂持有共享 client/resolver/scheduler，handler 绑定单次归档的对象存储。
 - `internal/storage/`：memory 与 S3-compatible 对象存储。

@@ -29,5 +29,3 @@
 ### 大目标
 - 分离`StorageType`和`StorageName`的语义
   - 当前`StorageName`既有名称也有类型的语义, 同一类型也可能有多个实现, 比如s3后端可以是本地minio, 也可能是cloudflare R2.
-
-- 为hitomi handler添加限流机制

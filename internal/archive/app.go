@@ -18,22 +18,22 @@ const pagePresignTTL = 24 * time.Hour
 const deletedPurgeBatchSize = 5
 
 type App struct {
-	documents      documents.Store
-	storages       map[storage.StorageName]storage.ObjectStore
-	defaultStorage storage.StorageName
-	deletedSweep   time.Duration
-	sources        map[sources.SourceType]SourceHandler
-	logger         *slog.Logger
+	documents       documents.Store
+	storages        map[storage.StorageName]storage.ObjectStore
+	defaultStorage  storage.StorageName
+	deletedSweep    time.Duration
+	sourceFactories map[sources.SourceType]SourceHandlerFactory
+	logger          *slog.Logger
 }
 
 func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage storage.StorageName, deletedSweep time.Duration) *App {
 	return &App{
-		documents:      documentStore,
-		storages:       make(map[storage.StorageName]storage.ObjectStore),
-		defaultStorage: defaultStorage,
-		deletedSweep:   deletedSweep,
-		sources:        make(map[sources.SourceType]SourceHandler),
-		logger:         logger,
+		documents:       documentStore,
+		storages:        make(map[storage.StorageName]storage.ObjectStore),
+		defaultStorage:  defaultStorage,
+		deletedSweep:    deletedSweep,
+		sourceFactories: make(map[sources.SourceType]SourceHandlerFactory),
+		logger:          logger,
 	}
 }
 
@@ -47,12 +47,18 @@ func (a *App) onPageDownloaded(ctx context.Context, documentID int, page documen
 	})
 }
 
-func (a *App) RegisterSource(handler SourceHandler) error {
-	err := handler.RegisterPageDownloadHook(a.onPageDownloaded)
-	if err != nil {
-		return err
+func (a *App) RegisterSourceFactory(factory SourceHandlerFactory) error {
+	if factory == nil {
+		return errors.New("source handler factory is required")
 	}
-	a.sources[handler.Source()] = handler
+	source := factory.Source()
+	if source == "" {
+		return errors.New("source handler factory source is required")
+	}
+	if _, exists := a.sourceFactories[source]; exists {
+		return fmt.Errorf("source handler factory already registered: %s", source)
+	}
+	a.sourceFactories[source] = factory
 	return nil
 }
 
@@ -68,7 +74,7 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 		return documents.Document{}, errors.New("source_document_id is required")
 	}
 
-	if _, err := a.getSource(input.Source); err != nil {
+	if _, err := a.getSourceFactory(input.Source); err != nil {
 		return documents.Document{}, err
 	}
 
@@ -291,13 +297,17 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		return documents.Document{}, err
 	}
 
-	handler, err := a.getSource(document.Source)
+	factory, err := a.getSourceFactory(document.Source)
 	if err != nil {
 		return a.failDocument(ctx, id, err)
 	}
 	objectStorage, err := a.getStorage(document.StorageBackend)
 	if err != nil {
 		return a.failDocument(ctx, id, err)
+	}
+	handler := factory.NewHandler(objectStorage, a.onPageDownloaded)
+	if handler == nil {
+		return a.failDocument(ctx, id, fmt.Errorf("source handler factory returned nil: %s", document.Source))
 	}
 
 	err = a.documents.TransitionTo(ctx, id, documents.StatusResolving)
@@ -329,7 +339,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 		if err := a.documents.TransitionTo(ctx, id, documents.StatusDownloading); err != nil {
 			return a.failDocument(ctx, id, err)
 		}
-		_, err = handler.ArchiveContent(ctx, document, objectStorage)
+		_, err = handler.ArchiveContent(ctx, document)
 		if err != nil {
 			return a.failDocument(ctx, id, err)
 		}
@@ -339,7 +349,7 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	if err != nil {
 		return a.failDocument(ctx, id, err)
 	}
-	if err := handler.ArchiveManifest(ctx, document, objectStorage); err != nil {
+	if err := handler.ArchiveManifest(ctx, document); err != nil {
 		return a.failDocument(ctx, id, err)
 	}
 	if err := a.documents.TransitionTo(ctx, id, documents.StatusArchived); err != nil {
@@ -348,12 +358,12 @@ func (a *App) processDocument(ctx context.Context, id int) (documents.Document, 
 	return a.documents.Get(ctx, id)
 }
 
-func (a *App) getSource(source sources.SourceType) (SourceHandler, error) {
-	handler, ok := a.sources[source]
+func (a *App) getSourceFactory(source sources.SourceType) (SourceHandlerFactory, error) {
+	factory, ok := a.sourceFactories[source]
 	if !ok {
-		return nil, fmt.Errorf("source handler not found: %s", source)
+		return nil, fmt.Errorf("source handler factory not found: %s", source)
 	}
-	return handler, nil
+	return factory, nil
 }
 
 func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStore, error) {

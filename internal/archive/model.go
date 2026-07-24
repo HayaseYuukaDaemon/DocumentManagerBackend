@@ -23,10 +23,15 @@ type PageResult struct {
 	Object      storage.Object
 }
 
-type SourceHandler interface {
+type PageDownloadHook func(ctx context.Context, documentID int, page documents.Page) error
+
+type SourceHandlerFactory interface {
 	Source() sources.SourceType
+	NewHandler(objects storage.ObjectStore, hook PageDownloadHook) SourceHandler
+}
+
+type SourceHandler interface {
 	ResolveDocument(ctx context.Context, document documents.Document) (documents.Document, error)
-	ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error)
-	ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error
-	RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error
+	ArchiveContent(ctx context.Context, document documents.Document) ([]documents.Page, error)
+	ArchiveManifest(ctx context.Context, document documents.Document) error
 }

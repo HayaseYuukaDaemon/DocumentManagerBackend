@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"time"
 
 	"document-archive/internal/archive"
 	"document-archive/internal/documents"
@@ -21,183 +20,52 @@ const SourceTypeHitomi sources.SourceType = "hitomi"
 const (
 	defaultInitialConcurrency = 4
 	defaultMaxConcurrency     = 16
-	defaultInitialBackoff     = time.Second
-	defaultMaxBackoff         = 30 * time.Second
-	defaultDownloadAttempts   = 5
 )
 
-type Handler struct {
-	resolver         *Resolver
-	scheduler        *ConcurrencyScheduler
-	pageDownloadHook func(ctx context.Context, documentID int, page documents.Page) error
+type Factory struct {
+	resolver  *Resolver
+	scheduler *sources.ConcurrencyScheduler
 }
 
-func NewHandler() *Handler {
-	return &Handler{
+type Handler struct {
+	objects          storage.ObjectStore
+	resolver         *Resolver
+	scheduler        *sources.ConcurrencyScheduler
+	pageDownloadHook archive.PageDownloadHook
+}
+
+var _ archive.SourceHandlerFactory = (*Factory)(nil)
+var _ archive.SourceHandler = (*Handler)(nil)
+
+func NewFactory() *Factory {
+	return &Factory{
 		resolver:  NewResolver(nil),
-		scheduler: NewConcurrencyScheduler(defaultInitialConcurrency, defaultMaxConcurrency),
+		scheduler: sources.NewConcurrencyScheduler(defaultInitialConcurrency, defaultMaxConcurrency),
 	}
 }
 
-func (h *Handler) Source() sources.SourceType {
+func (f *Factory) Source() sources.SourceType {
 	return SourceTypeHitomi
 }
 
-type ConcurrencyScheduler struct {
-	sem chan struct{}
-
-	mu                sync.Mutex
-	changed           chan struct{}
-	limit             int
-	successes         int
-	generation        uint64
-	blockedUntil      time.Time
-	backoff           time.Duration
-	initialBackoff    time.Duration
-	maxBackoff        time.Duration
-	maxAttemptsPerJob int
-}
-
-type schedulerPermit struct {
-	generation uint64
-}
-
-func NewConcurrencyScheduler(initialConcurrency, maxConcurrency int) *ConcurrencyScheduler {
-	if maxConcurrency < 1 {
-		maxConcurrency = 1
-	}
-	if initialConcurrency < 1 {
-		initialConcurrency = 1
-	}
-	if initialConcurrency > maxConcurrency {
-		initialConcurrency = maxConcurrency
-	}
-	return &ConcurrencyScheduler{
-		sem:               make(chan struct{}, maxConcurrency),
-		changed:           make(chan struct{}),
-		limit:             initialConcurrency,
-		initialBackoff:    defaultInitialBackoff,
-		maxBackoff:        defaultMaxBackoff,
-		maxAttemptsPerJob: defaultDownloadAttempts,
+func (f *Factory) NewHandler(objects storage.ObjectStore, hook archive.PageDownloadHook) archive.SourceHandler {
+	return &Handler{
+		objects:          objects,
+		resolver:         f.resolver,
+		scheduler:        f.scheduler,
+		pageDownloadHook: hook,
 	}
 }
 
-func (s *ConcurrencyScheduler) Do(ctx context.Context, task func(context.Context) error) error {
-	for attempt := 1; ; attempt++ {
-		permit, err := s.acquire(ctx)
-		if err != nil {
-			return err
-		}
-
-		err = task(ctx)
-		s.finish(permit, err)
-		if !errors.Is(err, ErrHitomiRateLimited) {
-			return err
-		}
-		if attempt >= s.maxAttemptsPerJob {
-			return fmt.Errorf("hitomi request remained rate limited after %d attempts: %w", attempt, err)
-		}
+func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Document) error {
+	if h.objects == nil {
+		return errors.New("object store is required")
 	}
-}
-
-func (s *ConcurrencyScheduler) acquire(ctx context.Context) (schedulerPermit, error) {
-	for {
-		s.mu.Lock()
-		wait := time.Until(s.blockedUntil)
-		if wait <= 0 && len(s.sem) < s.limit {
-			s.sem <- struct{}{}
-			permit := schedulerPermit{generation: s.generation}
-			s.mu.Unlock()
-			return permit, nil
-		}
-		changed := s.changed
-		s.mu.Unlock()
-
-		if wait > 0 {
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return schedulerPermit{}, ctx.Err()
-			case <-changed:
-				timer.Stop()
-			case <-timer.C:
-			}
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			return schedulerPermit{}, ctx.Err()
-		case <-changed:
-		}
-	}
-}
-
-func (s *ConcurrencyScheduler) finish(permit schedulerPermit, taskErr error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	<-s.sem
-	if errors.Is(taskErr, ErrHitomiRateLimited) {
-		s.applyRateLimitLocked(permit, taskErr)
-	} else if taskErr == nil && permit.generation == s.generation {
-		s.applySuccessLocked()
-	}
-	s.signalLocked()
-}
-
-func (s *ConcurrencyScheduler) applyRateLimitLocked(permit schedulerPermit, taskErr error) {
-	// Requests from the same in-flight generation commonly fail together. Only the
-	// first response changes the shared schedule; the rest observe the new generation.
-	if permit.generation != s.generation {
-		return
-	}
-
-	s.generation++
-	s.limit = max(1, s.limit/2)
-	s.successes = 0
-	if s.backoff < s.initialBackoff {
-		s.backoff = s.initialBackoff
-	} else {
-		s.backoff = min(s.backoff*2, s.maxBackoff)
-	}
-
-	var rateLimitErr *HitomiRateLimitError
-	if errors.As(taskErr, &rateLimitErr) && rateLimitErr.RetryAfter > s.backoff {
-		s.backoff = min(rateLimitErr.RetryAfter, s.maxBackoff)
-	}
-	s.blockedUntil = time.Now().Add(s.backoff)
-}
-
-func (s *ConcurrencyScheduler) applySuccessLocked() {
-	s.successes++
-	if s.successes < s.limit {
-		return
-	}
-
-	s.successes = 0
-	if s.limit < cap(s.sem) {
-		s.limit++
-	}
-	if s.backoff > s.initialBackoff {
-		s.backoff /= 2
-	} else {
-		s.backoff = 0
-	}
-}
-
-func (s *ConcurrencyScheduler) signalLocked() {
-	close(s.changed)
-	s.changed = make(chan struct{})
-}
-
-func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Document, objects storage.ObjectStore) error {
 	body, err := json.Marshal(document)
 	if err != nil {
 		return fmt.Errorf("marshal document snapshot: %w", err)
 	}
-	_, err = objects.PutObject(ctx, storage.ObjectInfo{
+	_, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 		Key:         archive.ManifestObjectKey(strconv.Itoa(document.ID)),
 		Size:        int64(len(body)),
 		ContentType: "application/json",
@@ -208,13 +76,13 @@ func (h *Handler) ArchiveManifest(ctx context.Context, document documents.Docume
 	return nil
 }
 
-func (h *Handler) downloadPage(ctx context.Context, page DownloadPage, objects storage.ObjectStore, document documents.Document) (documents.Page, error) {
+func (h *Handler) downloadPage(ctx context.Context, page DownloadPage, document documents.Document) (documents.Page, error) {
 	key, err := archive.PageObjectKey(strconv.Itoa(document.ID), page.Hash, page.ContentType)
 	if err != nil {
 		return documents.Page{}, fmt.Errorf("build page %d object key: %w", page.Index, err)
 	}
 
-	objectInfo, err := objects.HeadObject(ctx, key)
+	objectInfo, err := h.objects.HeadObject(ctx, key)
 	if err == nil {
 		if objectInfo.ETag != "" && objectInfo.ETag != page.Hash {
 			return documents.Page{}, fmt.Errorf("page %d object hash mismatch: expected %s, got %s", page.Index, page.Hash, objectInfo.ETag)
@@ -242,7 +110,7 @@ func (h *Handler) downloadPage(ctx context.Context, page DownloadPage, objects s
 	}
 
 	size := int64(buf.Len())
-	objectInfo, err = objects.PutObject(ctx, storage.ObjectInfo{
+	objectInfo, err = h.objects.PutObject(ctx, storage.ObjectInfo{
 		Key:         key,
 		Size:        size,
 		ContentType: page.ContentType,
@@ -264,7 +132,10 @@ func (h *Handler) downloadPage(ctx context.Context, page DownloadPage, objects s
 	return docPage, nil
 }
 
-func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document, objects storage.ObjectStore) ([]documents.Page, error) {
+func (h *Handler) ArchiveContent(ctx context.Context, document documents.Document) ([]documents.Page, error) {
+	if h.objects == nil {
+		return nil, errors.New("object store is required")
+	}
 	comic, err := DeserializeGalleryInfo(document.SourceMeta)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize gallery info: %w", err)
@@ -291,7 +162,7 @@ func (h *Handler) ArchiveContent(ctx context.Context, document documents.Documen
 			var archivedPage documents.Page
 			err := h.scheduler.Do(ctx, func(ctx context.Context) error {
 				var err error
-				archivedPage, err = h.downloadPage(ctx, page, objects, document)
+				archivedPage, err = h.downloadPage(ctx, page, document)
 				return err
 			})
 			results <- pageResult{position: position, page: archivedPage, err: err}
@@ -358,10 +229,5 @@ func (h *Handler) recordPage(ctx context.Context, documentID int, page documents
 	if err := h.pageDownloadHook(ctx, documentID, page); err != nil {
 		return fmt.Errorf("failed to execute page download hook: %w", err)
 	}
-	return nil
-}
-
-func (h *Handler) RegisterPageDownloadHook(hook func(ctx context.Context, documentID int, page documents.Page) error) error {
-	h.pageDownloadHook = hook
 	return nil
 }
