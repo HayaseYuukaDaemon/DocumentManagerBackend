@@ -185,7 +185,7 @@ curl -X POST "$API/v1/documents/<document_id>/refresh?mode=all" \
 
 支持的 mode：
 
-- `only_meta_data`：重新入队并解析元数据，保留现有页面和进度。
+- `only_metadata`：重新入队并解析元数据，保留现有页面和进度。
 - `all`：重新入队，清空当前页面元数据和 `Progress.Done`；不删除对象存储中的 hash 对象，worker 可直接复用。
 - `restore`：将 `deleted` 或 `purged` 文档恢复为 queued，继续使用原文档 ID。
 

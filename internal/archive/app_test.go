@@ -361,8 +361,8 @@ func TestProcessDocumentRebuildsPartialPagesFromObjectStorage(t *testing.T) {
 	if err := documentStore.TransitionTo(ctx, doc.ID, documents.StatusFailed); err != nil {
 		t.Fatalf("TransitionTo(failed) returned error: %v", err)
 	}
-	if _, err := app.RefreshDocument(ctx, doc.ID, documents.OnlyMetaData); err != nil {
-		t.Fatalf("RefreshDocument(only_meta_data) returned error: %v", err)
+	if _, err := app.RefreshDocument(ctx, doc.ID, documents.OnlyMetadata); err != nil {
+		t.Fatalf("RefreshDocument(only_metadata) returned error: %v", err)
 	}
 
 	archived, err := app.processDocument(ctx, doc.ID)

@@ -50,7 +50,7 @@
 - `QueryByStatus` / 显式状态查询是授权控制面语义：调用方显式传入什么状态，就按该状态查询，包括 `deleted` / `purged`。这与 `Get` / 默认查询 / 按来源 ID 的隐式查询语义不同。
 - `GET /v1/documents/{document_id}/manifest` 当前返回 `501 Not Implemented`。
 - `GET /v1/documents/{document_id}/pages/{page_index}` 对 memory storage backend 直接返回对象内容；对 S3 等非 memory backend 返回预签名 GET URL 的 302 redirect。
-- `POST /v1/documents/{document_id}/refresh` 当前支持三种 mode：`only_meta_data` 重新入队但保留页面和进度；`all` 先通过 `TransitionTo` 重新入队，再调用 `Store.ResetPages` 清空 Pages 并把 `Done` 重置为 0，但不删除 OSS 对象；`restore` 仅用于通过 `Store.Restore` 恢复 `deleted` / `purged` 文档。前两种 mode 仍受常规状态流转图约束。
+- `POST /v1/documents/{document_id}/refresh` 当前支持三种 mode：`only_metadata` 重新入队但保留页面和进度；`all` 先通过 `TransitionTo` 重新入队，再调用 `Store.ResetPages` 清空 Pages 并把 `Done` 重置为 0，但不删除 OSS 对象；`restore` 仅用于通过 `Store.Restore` 恢复 `deleted` / `purged` 文档。前两种 mode 仍受常规状态流转图约束。
 - CORS 由 `allow_cors` 控制。空列表表示不返回 CORS header；列表中可配置精确 Origin 或 `"*"`。CORS middleware 在鉴权前处理 OPTIONS preflight，因此浏览器预检不需要 Bearer Token。
 
 ## 文档状态与删除语义

@@ -167,7 +167,7 @@ func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]
 
 func (a *App) RefreshDocument(ctx context.Context, id int, mode documents.RefreshMode) (documents.Document, error) {
 	switch mode {
-	case documents.OnlyMetaData:
+	case documents.OnlyMetadata:
 		if err := a.documents.TransitionTo(ctx, id, documents.StatusQueued); err != nil {
 			return documents.Document{}, err
 		}

@@ -142,7 +142,7 @@ const (
 type RefreshMode string
 
 const (
-	OnlyMetaData RefreshMode = "only_meta_data"
+	OnlyMetadata RefreshMode = "only_metadata"
 	All          RefreshMode = "all"
 	Restore      RefreshMode = "restore"
 )

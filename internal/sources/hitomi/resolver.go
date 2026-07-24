@@ -23,6 +23,21 @@ const (
 )
 
 var ErrComicNotFound = errors.New("hitomi comic not found")
+var ErrHitomiRateLimited = errors.New("hitomi rate limited")
+
+type HitomiRateLimitError struct {
+	URL        string
+	StatusCode int
+	RetryAfter time.Duration
+}
+
+func (e *HitomiRateLimitError) Error() string {
+	return fmt.Sprintf("GET %s returned %d: %v", e.URL, e.StatusCode, ErrHitomiRateLimited)
+}
+
+func (e *HitomiRateLimitError) Unwrap() error {
+	return ErrHitomiRateLimited
+}
 
 type Resolver struct {
 	client *http.Client
@@ -122,6 +137,15 @@ func (r *Resolver) DownloadPage(ctx context.Context, page DownloadPage, w io.Wri
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
 			return fmt.Errorf("page not found: %s", page.URL)
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+			resp.Body.Close()
+			return &HitomiRateLimitError{
+				URL:        page.URL,
+				StatusCode: resp.StatusCode,
+				RetryAfter: retryAfter,
+			}
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -412,4 +436,22 @@ func sleepBeforeRetry(ctx context.Context, attempt int) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
