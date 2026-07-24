@@ -37,7 +37,7 @@ type S3Store struct {
 	presign     *s3.PresignClient
 }
 
-func NewS3Store(cfg S3Config) (*S3Store, error) {
+func NewS3Store(name StorageName, cfg S3Config) (*S3Store, error) {
 	if cfg.Bucket == "" {
 		return nil, errors.New("s3 bucket is required")
 	}
@@ -66,7 +66,7 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 		presignOptions := options
 		presignOptions.BaseEndpoint = aws.String(cfg.Endpoint)
 		return &S3Store{
-			storageName: S3StorageName,
+			storageName: name,
 			bucket:      cfg.Bucket,
 			client:      client,
 			presign:     s3.NewPresignClient(s3.New(presignOptions)),
@@ -74,7 +74,7 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 	} else {
 		client = s3.New(options)
 		return &S3Store{
-			storageName: S3StorageName,
+			storageName: name,
 			bucket:      cfg.Bucket,
 			client:      client,
 			presign:     s3.NewPresignClient(client),
@@ -83,8 +83,12 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 
 }
 
-func (s *S3Store) StorageName() StorageName {
+func (s *S3Store) Name() StorageName {
 	return s.storageName
+}
+
+func (s *S3Store) Type() StorageType {
+	return S3StorageType
 }
 
 func (s *S3Store) DeleteObject(ctx context.Context, key string) error {

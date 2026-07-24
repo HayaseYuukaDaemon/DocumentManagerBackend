@@ -1,6 +1,6 @@
 # document-archive
 
-`document-archive` 是 ComicManager 的 Go 归档/采集服务。它负责解析来源元数据、下载和归档页面、维护任务状态并生成文档快照；页面等二进制对象由 memory 或 S3-compatible 对象存储保存。
+`document-archive` 是 ComicManager 的 Go 归档/采集服务。它负责解析来源元数据、下载和归档页面、维护任务状态并生成文档快照；页面等二进制对象由命名的 memory 或 S3-compatible 对象存储实例保存。
 
 当前支持的来源：
 
@@ -17,7 +17,7 @@
 - 基于 token、角色和路由权限的可选鉴权
 - SQLite 文档存储，以及行为对齐的内存实现
 - queued 归档 worker 和 deleted 清理 worker
-- memory 与 S3-compatible 对象存储
+- 支持多个命名实例的 memory 与 S3-compatible 对象存储
 - 页面 hash 寻址、对象复用和全量刷新
 - deleted、purged、restore 文档生命周期
 - 显式 Origin 白名单或通配符 CORS
@@ -45,6 +45,14 @@ go test ./...
 
 完整示例见 [`internal/config/config.demo.yml`](internal/config/config.demo.yml)。
 
+如果手头只有部分配置，可以先用合并工具补齐未声明字段：
+
+```bash
+go run ./tools/config_merge.go -in config.partial.yml -out config.yml
+```
+
+工具以程序内置默认值为底合并配置并输出完整 YAML；服务本身仍要求 `config.yml` 包含全部必要字段。
+
 ```yaml
 addr: ":8080"
 log_level: "info"
@@ -54,14 +62,20 @@ sqlite_path: "document-archive.db"
 deleted_sweep_interval: "24h"
 allow_cors: []
 
-s3:
-  endpoint: ""
-  bucket: ""
-  region: "us-east-1"
-  access_key_id: ""
-  secret_access_key: ""
-  session_token: ""
-  use_path_style: false
+storages:
+  memory:
+    type: "memory"
+  minio:
+    type: "s3"
+    s3:
+      internal_endpoint: ""
+      endpoint: "http://127.0.0.1:9000"
+      bucket: "archive"
+      region: "us-east-1"
+      access_key_id: "minioadmin"
+      secret_access_key: "minioadmin"
+      session_token: ""
+      use_path_style: true
 
 role:
   admin-token:
@@ -81,12 +95,15 @@ role:
 主要配置项：
 
 - `document_store`：`sqlite` 或 `memory`。
-- `default_storage`：未在归档请求中指定存储时使用的后端，支持 `memory` 或 `s3`。
+- `default_storage`：未在归档请求中指定存储时使用的对象存储实例名，必须存在于 `storages` 中。
+- `storages`：以实例名为 key 的对象存储映射；每个实例通过 `type` 声明实现类型，目前支持 `memory` 和 `s3`。
 - `deleted_sweep_interval`：deleted 文档的周期清理间隔；设为 `0` 可关闭周期清理，但启动时仍会补扫一次。
 - `allow_cors`：允许的 Origin 列表；空列表表示不启用 CORS，支持精确 Origin 和 `"*"`。
 - `role`：以 Bearer Token 为 key 的角色映射；为空时不启用鉴权。
 
-服务始终注册 memory 对象存储。当 `default_storage` 为 `s3` 或配置了 `s3.bucket` 时，也会注册 S3-compatible 后端。Cloudflare R2、AWS S3 通常使用 virtual-hosted-style；MinIO 等服务可设置 `use_path_style: true`。
+服务会注册 `storages` 中声明的全部实例。同一实现类型可以有多个实例，例如 `minio` 与 `r2` 都可声明为 `type: s3`，文档的 `storage_backend` 保存所选实例名。Cloudflare R2、AWS S3 通常使用 virtual-hosted-style；MinIO 等服务可设置 `use_path_style: true`。
+
+从旧配置升级时，需要把顶层 `s3` 配置移动到 `storages.<实例名>.s3`，并让 `default_storage` 引用该实例名。数据库 schema 和 HTTP 字段不变，`storage_backend` 的值从固定实现类型明确为 `storages` 中的实例名。
 
 ## 权限
 
@@ -132,7 +149,7 @@ curl -X POST "$API/v1/documents/request" \
   -d '{"source":"hitomi","source_document_id":"3886065"}'
 ```
 
-JMComic 请求将 `source` 改为 `jmcomic`。请求体还可通过 `storage_backend` 为单个文档指定 `memory` 或 `s3`。
+JMComic 请求将 `source` 改为 `jmcomic`。请求体还可通过 `storage_backend` 为单个文档指定 `storages` 中注册的实例名。
 
 ### 获取文档
 
@@ -178,7 +195,7 @@ curl -L "$API/v1/documents/<document_id>/pages/<page_index>" \
   -o page.bin
 ```
 
-memory 后端由服务直接返回对象内容；S3 后端返回有效期 24 小时的预签名 GET URL，并通过 `302` 跳转。
+`type: memory` 的实例由服务直接返回对象内容；`type: s3` 的实例返回有效期 24 小时的预签名 GET URL，并通过 `302` 跳转。
 
 ### 刷新和恢复
 
@@ -233,4 +250,4 @@ documents/{document_id}/pages/{hash}.{ext}
 - `internal/documents/`：文档模型、状态机以及 memory/SQLite store。
 - `internal/httpapi/`：路由、鉴权、CORS 和响应。
 - `internal/sources/`：来源工厂、handler 及公共自适应并发调度器；工厂持有共享 client/resolver/scheduler，handler 绑定单次归档的对象存储。
-- `internal/storage/`：memory 与 S3-compatible 对象存储。
+- `internal/storage/`：命名对象存储实例、存储类型以及 memory/S3-compatible 实现。

@@ -5,15 +5,20 @@ document_store: "sqlite"
 sqlite_path: "document-archive.db"
 deleted_sweep_interval: "24h"
 allow_cors: []
-s3:
-  internal_endpoint: ""
-  endpoint: ""
-  bucket: ""
-  region: "us-east-1"
-  access_key_id: ""
-  secret_access_key: ""
-  session_token: ""
-  use_path_style: false
+storages:
+  memory:
+    type: "memory"
+  minio:
+    type: "s3"
+    s3:
+      internal_endpoint: ""
+      endpoint: "http://127.0.0.1:9000"
+      bucket: "archive"
+      region: "us-east-1"
+      access_key_id: "minioadmin"
+      secret_access_key: "minioadmin"
+      session_token: ""
+      use_path_style: true
 role:
   "admin-token":
     name: "admin"

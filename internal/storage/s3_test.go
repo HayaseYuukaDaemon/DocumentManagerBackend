@@ -180,7 +180,7 @@ func newLocalS3TestStore(t *testing.T) *S3Store {
 		t.Skip("local S3-compatible service is not listening on 127.0.0.1:9000")
 	}
 
-	store, err := NewS3Store(S3Config{
+	store, err := NewS3Store("test-s3", S3Config{
 		Endpoint:        s3TestEndpoint,
 		Bucket:          s3TestBucket,
 		Region:          s3TestRegion,

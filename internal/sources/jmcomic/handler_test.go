@@ -22,8 +22,8 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 func TestFactoryCreatesHandlersWithSharedClient(t *testing.T) {
 	client := &ApiClient{}
 	factory := &Factory{client: client}
-	objects1 := storage.NewMemoryStore()
-	objects2 := storage.NewMemoryStore()
+	objects1 := storage.NewMemoryStore("memory-1")
+	objects2 := storage.NewMemoryStore("memory-2")
 
 	handler1 := factory.NewHandler(objects1, nil).(*Handler)
 	handler2 := factory.NewHandler(objects2, nil).(*Handler)

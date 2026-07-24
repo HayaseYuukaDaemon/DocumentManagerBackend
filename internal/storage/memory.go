@@ -28,15 +28,19 @@ type memoryObject struct {
 	updatedAt   time.Time
 }
 
-func NewMemoryStore() *MemoryStore {
+func NewMemoryStore(name StorageName) *MemoryStore {
 	return &MemoryStore{
-		storageName: MemoryStorageName,
+		storageName: name,
 		objects:     make(map[string]memoryObject),
 	}
 }
 
-func (s *MemoryStore) StorageName() StorageName {
+func (s *MemoryStore) Name() StorageName {
 	return s.storageName
+}
+
+func (s *MemoryStore) Type() StorageType {
+	return MemoryStorageType
 }
 
 func (s *MemoryStore) DeleteObject(ctx context.Context, key string) error {

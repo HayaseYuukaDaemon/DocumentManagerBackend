@@ -29,8 +29,8 @@ func TestLoadCreatesAndUsesDefaultsWithoutConfigFile(t *testing.T) {
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Fatalf("unexpected log level: %v", cfg.LogLevel)
 	}
-	if cfg.DefaultStorageBackend != storage.MemoryStorageName {
-		t.Fatalf("unexpected default storage: %q", cfg.DefaultStorageBackend)
+	if cfg.DefaultStorageName != "memory" {
+		t.Fatalf("unexpected default storage: %q", cfg.DefaultStorageName)
 	}
 	if cfg.DocumentStore != "sqlite" {
 		t.Fatalf("unexpected document store: %q", cfg.DocumentStore)
@@ -44,8 +44,8 @@ func TestLoadCreatesAndUsesDefaultsWithoutConfigFile(t *testing.T) {
 	if len(cfg.AllowCORS) != 0 {
 		t.Fatalf("allow_cors should default to empty, got %#v", cfg.AllowCORS)
 	}
-	if cfg.S3 != nil {
-		t.Fatalf("s3 should default to nil, got %#v", cfg.S3)
+	if len(cfg.Storages) != 1 || cfg.Storages["memory"].Type != storage.MemoryStorageType {
+		t.Fatalf("unexpected default object storages: %#v", cfg.Storages)
 	}
 
 	info, err := os.Stat(filepath.Join(dir, configFileName))
@@ -70,22 +70,27 @@ func TestLoadReadsConfigYAML(t *testing.T) {
 	writeConfigFile(t, dir, `
 addr: ":9090"
 log_level: "debug"
-default_storage: "s3"
+default_storage: "minio"
 document_store: "memory"
 sqlite_path: "/tmp/archive.db"
 deleted_sweep_interval: "12h"
 allow_cors:
   - "http://localhost:5173"
   - "https://example.com"
-s3:
-  internal_endpoint: "http://minio:9000"
-  endpoint: "http://127.0.0.1:9000"
-  bucket: "archive"
-  region: "us-east-1"
-  access_key_id: "config-key"
-  secret_access_key: "config-secret"
-  session_token: "config-session"
-  use_path_style: true
+storages:
+  memory:
+    type: "memory"
+  minio:
+    type: "s3"
+    s3:
+      internal_endpoint: "http://minio:9000"
+      endpoint: "http://127.0.0.1:9000"
+      bucket: "archive"
+      region: "us-east-1"
+      access_key_id: "config-key"
+      secret_access_key: "config-secret"
+      session_token: "config-session"
+      use_path_style: true
 role:
   admin-token:
     name: "admin"
@@ -108,8 +113,8 @@ role:
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Fatalf("unexpected log level: %v", cfg.LogLevel)
 	}
-	if cfg.DefaultStorageBackend != storage.S3StorageName {
-		t.Fatalf("unexpected default storage: %q", cfg.DefaultStorageBackend)
+	if cfg.DefaultStorageName != "minio" {
+		t.Fatalf("unexpected default storage: %q", cfg.DefaultStorageName)
 	}
 	if cfg.DocumentStore != "memory" {
 		t.Fatalf("unexpected document store: %q", cfg.DocumentStore)
@@ -123,19 +128,23 @@ role:
 	if !slices.Equal(cfg.AllowCORS, []string{"http://localhost:5173", "https://example.com"}) {
 		t.Fatalf("unexpected allow_cors: %#v", cfg.AllowCORS)
 	}
-	if cfg.S3 == nil {
-		t.Fatal("s3 config should be loaded")
+	if len(cfg.Storages) != 2 {
+		t.Fatalf("unexpected object storage count: %d", len(cfg.Storages))
 	}
-	if cfg.S3.Endpoint != "http://127.0.0.1:9000" || cfg.S3.Bucket != "archive" || cfg.S3.Region != "us-east-1" {
+	minio := cfg.Storages["minio"]
+	if minio.Type != storage.S3StorageType || minio.S3 == nil {
+		t.Fatalf("unexpected minio config: %#v", minio)
+	}
+	if minio.S3.Endpoint != "http://127.0.0.1:9000" || minio.S3.Bucket != "archive" || minio.S3.Region != "us-east-1" {
 		t.Fatalf("unexpected s3 endpoint/bucket/region: %#v", cfg)
 	}
-	if cfg.S3.InternalEndpoint != "http://minio:9000" {
-		t.Fatalf("unexpected s3 internal endpoint: %q", cfg.S3.InternalEndpoint)
+	if minio.S3.InternalEndpoint != "http://minio:9000" {
+		t.Fatalf("unexpected s3 internal endpoint: %q", minio.S3.InternalEndpoint)
 	}
-	if cfg.S3.AccessKeyID != "config-key" || cfg.S3.SecretAccessKey != "config-secret" || cfg.S3.SessionToken != "config-session" {
+	if minio.S3.AccessKeyID != "config-key" || minio.S3.SecretAccessKey != "config-secret" || minio.S3.SessionToken != "config-session" {
 		t.Fatalf("unexpected s3 credentials: %#v", cfg)
 	}
-	if !cfg.S3.UsePathStyle {
+	if !minio.S3.UsePathStyle {
 		t.Fatalf("s3 use path style should come from config")
 	}
 	admin, ok := cfg.Roles["admin-token"]
@@ -161,7 +170,10 @@ func TestLoadIgnoresEnvironment(t *testing.T) {
 	dir := chdirTemp(t)
 	want := defaultConfig()
 	want.Addr = ":9090"
-	want.S3 = &storage.S3Config{UsePathStyle: true}
+	want.Storages["minio"] = ObjectStorageConfig{
+		Type: storage.S3StorageType,
+		S3:   &storage.S3Config{UsePathStyle: true},
+	}
 	writeCompleteConfig(t, dir, want)
 	t.Setenv("ARCHIVE_ADDR", ":7070")
 	t.Setenv("ARCHIVE_S3_USE_PATH_STYLE", "false")
@@ -174,7 +186,7 @@ func TestLoadIgnoresEnvironment(t *testing.T) {
 	if cfg.Addr != ":9090" {
 		t.Fatalf("env should not override config addr, got %q", cfg.Addr)
 	}
-	if !cfg.S3.UsePathStyle {
+	if !cfg.Storages["minio"].S3.UsePathStyle {
 		t.Fatalf("env should not override config bool")
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -186,7 +198,13 @@ func TestLoadNormalizesConfigValues(t *testing.T) {
 	dir := chdirTemp(t)
 	want := defaultConfig()
 	want.LogLevel = slog.LevelWarn
-	want.DefaultStorageBackend = " S3 "
+	want.DefaultStorageName = " MinIO "
+	want.Storages = map[storage.StorageName]ObjectStorageConfig{
+		" MinIO ": {
+			Type: " S3 ",
+			S3:   &storage.S3Config{},
+		},
+	}
 	want.DocumentStore = " MEMORY "
 	want.DeletedSweepInterval = 30 * time.Minute
 	writeCompleteConfig(t, dir, want)
@@ -198,14 +216,51 @@ func TestLoadNormalizesConfigValues(t *testing.T) {
 	if cfg.LogLevel != slog.LevelWarn {
 		t.Fatalf("unexpected log level: %v", cfg.LogLevel)
 	}
-	if cfg.DefaultStorageBackend != storage.S3StorageName {
-		t.Fatalf("unexpected normalized storage: %q", cfg.DefaultStorageBackend)
+	if cfg.DefaultStorageName != "MinIO" {
+		t.Fatalf("unexpected normalized storage: %q", cfg.DefaultStorageName)
+	}
+	if cfg.Storages["MinIO"].Type != storage.S3StorageType {
+		t.Fatalf("unexpected normalized storage config: %#v", cfg.Storages)
 	}
 	if cfg.DocumentStore != "memory" {
 		t.Fatalf("unexpected normalized document store: %q", cfg.DocumentStore)
 	}
 	if cfg.DeletedSweepInterval != 30*time.Minute {
 		t.Fatalf("unexpected deleted sweep interval: %v", cfg.DeletedSweepInterval)
+	}
+}
+
+func TestLoadAllowsMultipleInstancesOfSameStorageType(t *testing.T) {
+	dir := chdirTemp(t)
+	want := defaultConfig()
+	want.Storages["minio"] = ObjectStorageConfig{
+		Type: storage.S3StorageType,
+		S3:   &storage.S3Config{},
+	}
+	want.Storages["r2"] = ObjectStorageConfig{
+		Type: storage.S3StorageType,
+		S3:   &storage.S3Config{},
+	}
+	writeCompleteConfig(t, dir, want)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Storages["minio"].Type != storage.S3StorageType || cfg.Storages["r2"].Type != storage.S3StorageType {
+		t.Fatalf("same-type storage instances were not preserved: %#v", cfg.Storages)
+	}
+}
+
+func TestLoadRejectsUnconfiguredDefaultStorage(t *testing.T) {
+	dir := chdirTemp(t)
+	cfg := defaultConfig()
+	cfg.DefaultStorageName = "missing"
+	writeCompleteConfig(t, dir, cfg)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "default storage not configured") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -263,7 +318,10 @@ func TestLoadReturnsErrorForMissingConfigField(t *testing.T) {
 func TestLoadReturnsErrorForMissingS3ConfigField(t *testing.T) {
 	dir := chdirTemp(t)
 	cfg := defaultConfig()
-	cfg.S3 = &storage.S3Config{}
+	cfg.Storages["minio"] = ObjectStorageConfig{
+		Type: storage.S3StorageType,
+		S3:   &storage.S3Config{},
+	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
@@ -275,7 +333,7 @@ func TestLoadReturnsErrorForMissingS3ConfigField(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Load should return error for missing s3 config field")
 	}
-	if !strings.Contains(err.Error(), "s3.internal_endpoint") {
+	if !strings.Contains(err.Error(), "storages.minio.s3.internal_endpoint") {
 		t.Fatalf("unexpected missing field error: %v", err)
 	}
 }

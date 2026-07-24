@@ -19,8 +19,8 @@ import (
 
 func TestFactoryCreatesHandlersWithSharedRuntime(t *testing.T) {
 	factory := NewFactory()
-	objects1 := storage.NewMemoryStore()
-	objects2 := storage.NewMemoryStore()
+	objects1 := storage.NewMemoryStore("memory-1")
+	objects2 := storage.NewMemoryStore("memory-2")
 
 	handler1 := factory.NewHandler(objects1, nil).(*Handler)
 	handler2 := factory.NewHandler(objects2, nil).(*Handler)
@@ -102,7 +102,7 @@ func TestArchiveContentDownloadsPagesConcurrently(t *testing.T) {
 	}
 	var recordedMu sync.Mutex
 	recorded := make([]documents.Page, 0, len(files))
-	handler := factory.NewHandler(storage.NewMemoryStore(), func(_ context.Context, _ int, page documents.Page) error {
+	handler := factory.NewHandler(storage.NewMemoryStore("memory"), func(_ context.Context, _ int, page documents.Page) error {
 		recordedMu.Lock()
 		defer recordedMu.Unlock()
 		recorded = append(recorded, page)

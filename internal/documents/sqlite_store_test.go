@@ -23,7 +23,7 @@ func TestSQLiteStorePersistsDocuments(t *testing.T) {
 		SourceDocumentID: "sqlite-persist",
 		SourceMeta:       []byte(`{"ok":true}`),
 		Title:            "SQLite Persist",
-		StorageBackend:   storage.MemoryStorageName,
+		StorageBackend:   storage.StorageName("memory"),
 		status:           StatusQueued,
 		Progress: Progress{
 			Done:  1,

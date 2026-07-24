@@ -27,5 +27,3 @@
 - 再开个表, 表名叫`maintainance_log`, 专门记录定期删除等维护事件
 
 ### 大目标
-- 分离`StorageType`和`StorageName`的语义
-  - 当前`StorageName`既有名称也有类型的语义, 同一类型也可能有多个实现, 比如s3后端可以是本地minio, 也可能是cloudflare R2.

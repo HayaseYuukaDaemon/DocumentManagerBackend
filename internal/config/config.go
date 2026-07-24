@@ -39,16 +39,21 @@ func (r Role) HasPermission(permission Permissions) bool {
 	return slices.Contains(r.Permissions, permission)
 }
 
+type ObjectStorageConfig struct {
+	Type storage.StorageType `yaml:"type"`
+	S3   *storage.S3Config   `yaml:"s3,omitempty"`
+}
+
 type Config struct {
-	Addr                  string              `yaml:"addr"`
-	LogLevel              slog.Level          `yaml:"log_level"`
-	DefaultStorageBackend storage.StorageName `yaml:"default_storage"`
-	DocumentStore         string              `yaml:"document_store"`
-	SQLitePath            string              `yaml:"sqlite_path"`
-	DeletedSweepInterval  time.Duration       `yaml:"deleted_sweep_interval"`
-	AllowCORS             []string            `yaml:"allow_cors"`
-	S3                    *storage.S3Config   `yaml:"s3"`
-	Roles                 map[string]Role     `yaml:"role"`
+	Addr                 string                                      `yaml:"addr"`
+	LogLevel             slog.Level                                  `yaml:"log_level"`
+	DefaultStorageName   storage.StorageName                         `yaml:"default_storage"`
+	DocumentStore        string                                      `yaml:"document_store"`
+	SQLitePath           string                                      `yaml:"sqlite_path"`
+	DeletedSweepInterval time.Duration                               `yaml:"deleted_sweep_interval"`
+	AllowCORS            []string                                    `yaml:"allow_cors"`
+	Storages             map[storage.StorageName]ObjectStorageConfig `yaml:"storages"`
+	Roles                map[string]Role                             `yaml:"role"`
 }
 
 const configFileName = "config.yml"
@@ -87,9 +92,49 @@ func readConfig(path string) (Config, error) {
 	if cfg.DeletedSweepInterval < 0 {
 		return Config{}, fmt.Errorf("parse %s: deleted_sweep_interval must not be negative", path)
 	}
-	cfg.DefaultStorageBackend = storage.StorageName(strings.ToLower(strings.TrimSpace(string(cfg.DefaultStorageBackend))))
+	cfg.DefaultStorageName = storage.StorageName(strings.TrimSpace(string(cfg.DefaultStorageName)))
 	cfg.DocumentStore = strings.ToLower(strings.TrimSpace(cfg.DocumentStore))
+	if err := normalizeAndValidateStorages(&cfg); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+func normalizeAndValidateStorages(cfg *Config) error {
+	storages := make(map[storage.StorageName]ObjectStorageConfig, len(cfg.Storages))
+	for rawName, storageConfig := range cfg.Storages {
+		name := storage.StorageName(strings.TrimSpace(string(rawName)))
+		if name == "" {
+			return errors.New("storage name must not be empty")
+		}
+		if _, exists := storages[name]; exists {
+			return fmt.Errorf("duplicate storage name after normalization: %s", name)
+		}
+
+		storageConfig.Type = storage.StorageType(strings.ToLower(strings.TrimSpace(string(storageConfig.Type))))
+		switch storageConfig.Type {
+		case storage.MemoryStorageType:
+			if storageConfig.S3 != nil {
+				return fmt.Errorf("storage %q of type memory must not contain s3 config", name)
+			}
+		case storage.S3StorageType:
+			if storageConfig.S3 == nil {
+				return fmt.Errorf("storage %q of type s3 requires s3 config", name)
+			}
+		default:
+			return fmt.Errorf("storage %q has unsupported type %q", name, storageConfig.Type)
+		}
+		storages[name] = storageConfig
+	}
+	cfg.Storages = storages
+
+	if cfg.DefaultStorageName == "" {
+		return errors.New("default_storage must not be empty")
+	}
+	if _, ok := cfg.Storages[cfg.DefaultStorageName]; !ok {
+		return fmt.Errorf("default storage not configured: %s", cfg.DefaultStorageName)
+	}
+	return nil
 }
 
 func requireConfigFields(data []byte) error {
@@ -120,7 +165,8 @@ func requireStructFields(node *yaml.Node, typ reflect.Type, prefix string) error
 		if !field.IsExported() {
 			continue
 		}
-		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		tagParts := strings.Split(field.Tag.Get("yaml"), ",")
+		name := tagParts[0]
 		if name == "" || name == "-" {
 			continue
 		}
@@ -130,6 +176,9 @@ func requireStructFields(node *yaml.Node, typ reflect.Type, prefix string) error
 		}
 		value, ok := values[name]
 		if !ok {
+			if slices.Contains(tagParts[1:], "omitempty") {
+				continue
+			}
 			return fmt.Errorf("missing required config field %q", path)
 		}
 		fieldType := field.Type
@@ -142,6 +191,23 @@ func requireStructFields(node *yaml.Node, typ reflect.Type, prefix string) error
 		if fieldType.Kind() == reflect.Struct {
 			if err := requireStructFields(value, fieldType, path); err != nil {
 				return err
+			}
+		}
+		if fieldType.Kind() == reflect.Map {
+			elementType := fieldType.Elem()
+			if elementType.Kind() == reflect.Pointer {
+				elementType = elementType.Elem()
+			}
+			if elementType == reflect.TypeOf(ObjectStorageConfig{}) {
+				if value.Kind != yaml.MappingNode {
+					return fmt.Errorf("config field %q must be a mapping", path)
+				}
+				for i := 0; i < len(value.Content); i += 2 {
+					entryPath := path + "." + value.Content[i].Value
+					if err := requireStructFields(value.Content[i+1], elementType, entryPath); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -159,15 +225,23 @@ func writeDefaultConfig(path string, cfg Config) error {
 	return nil
 }
 
+// Default returns a new Config populated with the service defaults.
+func Default() Config {
+	return defaultConfig()
+}
+
 func defaultConfig() Config {
 	return Config{
-		Addr:                  ":8080",
-		LogLevel:              slog.LevelInfo,
-		DefaultStorageBackend: storage.MemoryStorageName,
-		DocumentStore:         "sqlite",
-		SQLitePath:            "document-archive.db",
-		DeletedSweepInterval:  24 * time.Hour,
-		AllowCORS:             []string{},
-		Roles:                 map[string]Role{},
+		Addr:                 ":8080",
+		LogLevel:             slog.LevelInfo,
+		DefaultStorageName:   storage.StorageName("memory"),
+		DocumentStore:        "sqlite",
+		SQLitePath:           "document-archive.db",
+		DeletedSweepInterval: 24 * time.Hour,
+		AllowCORS:            []string{},
+		Storages: map[storage.StorageName]ObjectStorageConfig{
+			"memory": {Type: storage.MemoryStorageType},
+		},
+		Roles: map[string]Role{},
 	}
 }

@@ -10,8 +10,10 @@
 - 运行单个包的测试：`go test ./internal/documents`
 - 运行单个测试或一组测试：`go test ./internal/documents -run TestSQLiteStore`
 - 提交前格式化 Go 代码：`gofmt -w <files>`
+- 用默认值补全部分配置：`go run ./tools/config_merge.go -in config.partial.yml -out config.yml`
 
 配置只从默认值和当前工作目录下的 `config.yml` 读取，不再读取环境变量。需要修改监听地址、鉴权 token、文档存储、默认对象存储、S3 参数或 CORS 时，直接编辑 `config.yml`。
+主程序仍要求配置包含全部必要字段；`tools/config_merge.go` 仅用于在启动前将部分配置与程序默认值合并为完整配置。
 
 配置示例见 [internal/config/config.demo.yml](internal/config/config.demo.yml)。
 
@@ -28,12 +30,12 @@
 
 这是 ComicManager 的 Go HTTP 归档/采集服务。它负责按来源执行下载与归档流程，并维护文档元数据；页面和 manifest 等二进制对象通过对象存储接口抽象出去。
 
-- [cmd/server/main.go](cmd/server/main.go) 负责服务装配：读取 `config.yml`、创建文档存储、注册 Hitomi/JMComic 来源工厂和内存对象存储、按配置注册 S3-compatible 对象存储、启动归档 worker，然后启动 HTTP 服务。
+- [cmd/server/main.go](cmd/server/main.go) 负责服务装配：读取 `config.yml`、创建文档存储、注册 Hitomi/JMComic 来源工厂、按 `storages` 配置创建并注册命名对象存储实例、启动归档 worker，然后启动 HTTP 服务。
 - [internal/config/](internal/config/) 读取配置。优先级为默认值 < `config.yml`；不读取环境变量。默认值包括 `addr=:8080`、`document_store=sqlite`、`sqlite_path=document-archive.db`、`default_storage=memory`、`deleted_sweep_interval=24h`、`allow_cors=[]`。设置 `auth_token` 后会启用 Bearer Token 鉴权。
 - [internal/httpapi/](internal/httpapi/) 是 HTTP 层。它使用 Go 的 `http.ServeMux` 路由模式，并把业务操作委托给 `archive.App`。所有 `/v1/...` 业务路由在配置 token 后都会经过鉴权；`/healthz` 是公开接口。CORS 作为 mux 外层 middleware 统一处理，`allow_cors` 为空时不启用 CORS，非空时按显式 Origin 白名单或 `"*"` 匹配，预检请求会在鉴权前返回。
-- [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源工厂和对象存储。`RunWorker` 每秒轮询 queued 文档；处理单个文档时根据来源取得工厂、根据 `storage_backend` 取得对象存储，再创建绑定对象存储和页面 hook 的任务级 handler。worker 还会在启动时及 `deleted_sweep_interval` 周期上扫描 `deleted` 文档，只有在文档对象前缀清理成功后才推进为 `purged`。
+- [internal/archive/](internal/archive/) 是应用层。`App` 持有注册后的 `documents.Store`、来源工厂和按 `StorageName` 注册的对象存储。`RunWorker` 每秒轮询 queued 文档；处理单个文档时根据来源取得工厂、根据文档的 `storage_backend` 取得对象存储实例，再创建绑定对象存储和页面 hook 的任务级 handler。worker 还会在启动时及 `deleted_sweep_interval` 周期上扫描 `deleted` 文档，只有在文档对象前缀清理成功后才推进为 `purged`。
 - [internal/documents/](internal/documents/) 定义公开文档模型和 store 接口。当前有两个实现：[internal/documents/store.go](internal/documents/store.go) 中的内存存储，以及 [internal/documents/sqlite_store.go](internal/documents/sqlite_store.go) 中的 SQLite 存储。SQLite 存储把文档和页面放在两张表中，使用 `document_status` 表达完整文档状态，并按全局唯一模型对 `(source, source_document_id)` 组合保持唯一约束。
-- [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。当前实现包括 `MemoryStore` 和 S3-compatible `S3Store`。memory 对象保存在进程内存中，S3 对象通过 AWS SDK v2 访问，可配置 endpoint、bucket、region、credentials 和 path-style 行为。
+- [internal/storage/](internal/storage/) 定义 `ObjectStore` 抽象。`StorageName` 表示配置实例名，`StorageType` 表示实现类型；`ObjectStore.Name()` 和 `Type()` 分别暴露两者。当前实现包括 `MemoryStore` 和 S3-compatible `S3Store`，同一类型可注册多个命名实例。
 - [internal/sources/](internal/sources/) 包含来源抽象和公共 `ConcurrencyScheduler`；来源可通过 `ErrRateLimited` 及可选的 `RateLimitError` 退避时间向调度器反馈限流。每个来源工厂是 App 生命周期内的共享实例，持有 HTTP client、resolver、调度器等长期状态，并为每次归档创建短期 handler。[internal/sources/hitomi/](internal/sources/hitomi/) 的工厂共享 resolver 和公共限流调度器，任务级 handler 负责解析页面、下载或复用对象并发出页面更新。
 
 ## 请求流程
@@ -50,7 +52,7 @@
 - 已实现的路由包括：请求归档文档、按来源文档 ID 查询、按状态查询、获取文档、软删除、刷新、获取页面。
 - `QueryByStatus` / 显式状态查询是授权控制面语义：调用方显式传入什么状态，就按该状态查询，包括 `deleted` / `purged`。这与 `Get` / 默认查询 / 按来源 ID 的隐式查询语义不同。
 - `GET /v1/documents/{document_id}/manifest` 当前返回 `501 Not Implemented`。
-- `GET /v1/documents/{document_id}/pages/{page_index}` 对 memory storage backend 直接返回对象内容；对 S3 等非 memory backend 返回预签名 GET URL 的 302 redirect。
+- `GET /v1/documents/{document_id}/pages/{page_index}` 根据对象存储实例的 `StorageType` 分发：memory 直接返回对象内容，S3 返回预签名 GET URL 的 302 redirect。
 - `POST /v1/documents/{document_id}/refresh` 当前支持三种 mode：`only_metadata` 重新入队但保留页面和进度；`all` 先通过 `TransitionTo` 重新入队，再调用 `Store.ResetPages` 清空 Pages 并把 `Done` 重置为 0，但不删除 OSS 对象；`restore` 仅用于通过 `Store.Restore` 恢复 `deleted` / `purged` 文档。前两种 mode 仍受常规状态流转图约束。
 - CORS 由 `allow_cors` 控制。空列表表示不返回 CORS header；列表中可配置精确 Origin 或 `"*"`。CORS middleware 在鉴权前处理 OPTIONS preflight，因此浏览器预检不需要 Bearer Token。
 
@@ -79,7 +81,7 @@
 - 不同文档存储的 ID 语义不同：内存存储使用从 0 开始的 slice 下标，SQLite 使用自增 ID。
 - 两种文档存储中的 `Delete` 都是软删除：将状态流转为 `deleted`。已删除文档不会出现在常规 `Get` / 默认 `Query` / 按来源 ID 的隐式查询中，但会在显式 `deleted` 状态查询中返回。
 - SQLite 的 `documents.document_status` 有 CHECK 约束；`(source, source_document_id)` 在整张 `documents` 表上全局唯一。删除或清理后不会释放该身份，后续如需重新加入应调用 `Store.Restore`。
-- 当前服务总会注册 memory object store；当配置 `s3.bucket` 或 `default_storage=s3` 时也会注册 S3-compatible object store。
+- `storages` 以 `StorageName` 为 key 声明对象存储实例，每项通过 `type` 指定 `memory` 或 `s3`；`default_storage` 和文档的 `storage_backend` 都引用实例名。服务注册配置中的全部实例，同一类型可配置多个实例。
 - `deleted_sweep_interval` 控制后台清理 `deleted` 文档的周期；设为 `0` 可关闭周期清理，但程序启动时仍会补扫一次。
 - `storage.ObjectInfo.ETag` 是对象抽象层暴露给 HTTP/browser 的 ETag。`PutObject` 输入携带 ETag 时 storage 原样保存并返回；未携带时优先使用具体后端提供的 ETag（例如 S3 原生 ETag），后端未提供时再由 storage 基于对象内容计算。S3 后端把自定义输入 ETag 写入 user metadata `archive-etag`，以便后续 `HEAD/GET` 能读回同一个值。
 - 页面对象使用 `documents/{document_id}/pages/{hash}.{ext}` key，不再把 page index 写入 key。扩展名由页面 Content-Type 决定（WebP/JPEG/PNG/AVIF，其他类型回退为 `.bin`）。数据库 Pages 只表示当前页面顺序，OSS 作为 hash 寻址的内容缓存；全量刷新可以清空 Pages 后按新顺序重建，同 hash 且同类型的页面直接复用已有对象。

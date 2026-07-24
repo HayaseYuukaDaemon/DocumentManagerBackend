@@ -18,9 +18,11 @@ type ObjectInfo struct {
 
 type StorageName string
 
+type StorageType string
+
 const (
-	MemoryStorageName StorageName = "memory"
-	S3StorageName     StorageName = "s3"
+	MemoryStorageType StorageType = "memory"
+	S3StorageType     StorageType = "s3"
 )
 
 type Object struct {
@@ -29,7 +31,8 @@ type Object struct {
 }
 
 type ObjectStore interface {
-	StorageName() StorageName
+	Name() StorageName
+	Type() StorageType
 	PutObject(ctx context.Context, info ObjectInfo, body io.ReadSeeker) (ObjectInfo, error)
 	GetObject(ctx context.Context, key string) (Object, error)
 	HeadObject(ctx context.Context, key string) (ObjectInfo, error)

@@ -10,8 +10,14 @@ import (
 )
 
 func TestMemoryStorePutHeadAndPresign(t *testing.T) {
-	store := NewMemoryStore()
+	store := NewMemoryStore("test-memory")
 	ctx := context.Background()
+	if store.Name() != "test-memory" {
+		t.Fatalf("unexpected storage name: %q", store.Name())
+	}
+	if store.Type() != MemoryStorageType {
+		t.Fatalf("unexpected storage type: %q", store.Type())
+	}
 
 	putInfo, err := store.PutObject(ctx, ObjectInfo{
 		Key:         "documents/test/pages/000001.webp",
@@ -66,7 +72,7 @@ func TestMemoryStorePutHeadAndPresign(t *testing.T) {
 }
 
 func TestMemoryStorePutCalculatesETag(t *testing.T) {
-	store := NewMemoryStore()
+	store := NewMemoryStore("test-memory")
 
 	info, err := store.PutObject(context.Background(), ObjectInfo{
 		Key:         "documents/test/pages/000002.webp",
@@ -82,7 +88,7 @@ func TestMemoryStorePutCalculatesETag(t *testing.T) {
 }
 
 func TestMemoryStoreHeadMissingObject(t *testing.T) {
-	store := NewMemoryStore()
+	store := NewMemoryStore("test-memory")
 
 	_, err := store.HeadObject(context.Background(), "missing")
 	if !errors.Is(err, ErrObjectNotFound) {
@@ -91,7 +97,7 @@ func TestMemoryStoreHeadMissingObject(t *testing.T) {
 }
 
 func TestMemoryStoreDeletePrefix(t *testing.T) {
-	store := NewMemoryStore()
+	store := NewMemoryStore("test-memory")
 	ctx := context.Background()
 
 	for _, key := range []string{

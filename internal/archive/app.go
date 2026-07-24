@@ -18,22 +18,22 @@ const pagePresignTTL = 24 * time.Hour
 const deletedPurgeBatchSize = 5
 
 type App struct {
-	documents       documents.Store
-	storages        map[storage.StorageName]storage.ObjectStore
-	defaultStorage  storage.StorageName
-	deletedSweep    time.Duration
-	sourceFactories map[sources.SourceType]SourceHandlerFactory
-	logger          *slog.Logger
+	documents          documents.Store
+	storages           map[storage.StorageName]storage.ObjectStore
+	defaultStorageName storage.StorageName
+	deletedSweep       time.Duration
+	sourceFactories    map[sources.SourceType]SourceHandlerFactory
+	logger             *slog.Logger
 }
 
-func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorage storage.StorageName, deletedSweep time.Duration) *App {
+func NewApp(documentStore documents.Store, logger *slog.Logger, defaultStorageName storage.StorageName, deletedSweep time.Duration) *App {
 	return &App{
-		documents:       documentStore,
-		storages:        make(map[storage.StorageName]storage.ObjectStore),
-		defaultStorage:  defaultStorage,
-		deletedSweep:    deletedSweep,
-		sourceFactories: make(map[sources.SourceType]SourceHandlerFactory),
-		logger:          logger,
+		documents:          documentStore,
+		storages:           make(map[storage.StorageName]storage.ObjectStore),
+		defaultStorageName: defaultStorageName,
+		deletedSweep:       deletedSweep,
+		sourceFactories:    make(map[sources.SourceType]SourceHandlerFactory),
+		logger:             logger,
 	}
 }
 
@@ -62,8 +62,22 @@ func (a *App) RegisterSourceFactory(factory SourceHandlerFactory) error {
 	return nil
 }
 
-func (a *App) RegisterStorage(storage storage.ObjectStore) {
-	a.storages[storage.StorageName()] = storage
+func (a *App) RegisterStorage(objectStorage storage.ObjectStore) error {
+	if objectStorage == nil {
+		return errors.New("object storage is required")
+	}
+	name := objectStorage.Name()
+	if name == "" {
+		return errors.New("object storage name is required")
+	}
+	if objectStorage.Type() == "" {
+		return errors.New("object storage type is required")
+	}
+	if _, exists := a.storages[name]; exists {
+		return fmt.Errorf("object storage already registered: %s", name)
+	}
+	a.storages[name] = objectStorage
+	return nil
 }
 
 func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocumentInput) (documents.Document, error) {
@@ -78,18 +92,18 @@ func (a *App) RequestDocument(ctx context.Context, input documents.RequestDocume
 		return documents.Document{}, err
 	}
 
-	storageBackend := input.StorageBackend
-	if storageBackend == "" {
-		storageBackend = a.defaultStorage
+	storageName := input.StorageBackend
+	if storageName == "" {
+		storageName = a.defaultStorageName
 	}
-	if _, err := a.getStorage(storageBackend); err != nil {
+	if _, err := a.getStorage(storageName); err != nil {
 		return documents.Document{}, err
 	}
 
 	document := documents.Document{
 		Source:           input.Source,
 		SourceDocumentID: input.SourceDocumentID,
-		StorageBackend:   storageBackend,
+		StorageBackend:   storageName,
 	}
 	return a.documents.Create(ctx, document)
 }
@@ -99,7 +113,7 @@ func (a *App) GetDocument(ctx context.Context, id int) (documents.Document, erro
 }
 
 func (a *App) GetPage(ctx context.Context, document documents.Document, pageIndex int) (PageResult, error) {
-	storageBackend, err := a.getStorage(document.StorageBackend)
+	objectStorage, err := a.getStorage(document.StorageBackend)
 	if err != nil {
 		return PageResult{}, err
 	}
@@ -111,9 +125,9 @@ func (a *App) GetPage(ctx context.Context, document documents.Document, pageInde
 	if page.Key == "" {
 		return PageResult{}, fmt.Errorf("page not archived")
 	}
-	switch storageBackend.StorageName() {
-	case storage.MemoryStorageName:
-		pageObject, err := storageBackend.GetObject(ctx, page.Key)
+	switch objectStorage.Type() {
+	case storage.MemoryStorageType:
+		pageObject, err := objectStorage.GetObject(ctx, page.Key)
 		if err != nil {
 			return PageResult{}, fmt.Errorf("failed to get page object: %w", err)
 		}
@@ -121,8 +135,8 @@ func (a *App) GetPage(ctx context.Context, document documents.Document, pageInde
 			Kind:   PageResultObject,
 			Object: pageObject,
 		}, nil
-	case storage.S3StorageName:
-		redirectURL, err := storageBackend.PresignGetObject(ctx, page.Key, pagePresignTTL)
+	case storage.S3StorageType:
+		redirectURL, err := objectStorage.PresignGetObject(ctx, page.Key, pagePresignTTL)
 		if err != nil {
 			return PageResult{}, fmt.Errorf("failed to presign page object: %w", err)
 		}
@@ -131,7 +145,7 @@ func (a *App) GetPage(ctx context.Context, document documents.Document, pageInde
 			RedirectURL: redirectURL,
 		}, nil
 	}
-	return PageResult{}, fmt.Errorf("unsupported storage backend: %s", storageBackend.StorageName())
+	return PageResult{}, fmt.Errorf("unsupported storage type: %s", objectStorage.Type())
 }
 
 func (a *App) QueryDocument(ctx context.Context, input documents.QueryInput) ([]documents.Document, error) {
@@ -240,14 +254,14 @@ func (a *App) processDeleted(ctx context.Context) {
 		purgedCount := 0
 		for _, document := range deleted {
 			a.logger.Info("purging document archive", "document_id", document.ID)
-			storageBackend, err := a.getStorage(document.StorageBackend)
+			objectStorage, err := a.getStorage(document.StorageBackend)
 			if err != nil {
 				a.logger.Warn("get storage backend failed", "document_id", document.ID, "error", err)
 				continue
 			}
 
 			prefix := DocumentObjectPrefix(strconv.Itoa(document.ID))
-			if err := storageBackend.DeletePrefix(ctx, prefix); err != nil {
+			if err := objectStorage.DeletePrefix(ctx, prefix); err != nil {
 				if !errors.Is(err, storage.ErrObjectNotFound) {
 					a.logger.Warn("delete document objects failed", "document_id", document.ID, "prefix", prefix, "error", err)
 					a.logger.Warn("purge document skipped because object deletion did not complete", "document_id", document.ID)
@@ -366,10 +380,10 @@ func (a *App) getSourceFactory(source sources.SourceType) (SourceHandlerFactory,
 	return factory, nil
 }
 
-func (a *App) getStorage(storageBackend storage.StorageName) (storage.ObjectStore, error) {
-	objectStorage := a.storages[storageBackend]
+func (a *App) getStorage(storageName storage.StorageName) (storage.ObjectStore, error) {
+	objectStorage := a.storages[storageName]
 	if objectStorage == nil {
-		return nil, fmt.Errorf("storage backend not found: %s", storageBackend)
+		return nil, fmt.Errorf("object storage not found: %s", storageName)
 	}
 	return objectStorage, nil
 }

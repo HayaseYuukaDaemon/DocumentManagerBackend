@@ -39,7 +39,7 @@ func main() {
 	}
 	defer closeDocumentStore()
 
-	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageBackend, cfg.DeletedSweepInterval)
+	archiveApp := archive.NewApp(documentStore, logger, cfg.DefaultStorageName, cfg.DeletedSweepInterval)
 	err = archiveApp.RegisterSourceFactory(hitomi.NewFactory())
 	if err != nil {
 		logger.Error("failed to register source factory", "error", err, "source", hitomi.SourceTypeHitomi)
@@ -110,17 +110,27 @@ func newDocumentStore(ctx context.Context, cfg config.Config, logger *slog.Logge
 }
 
 func registerObjectStores(app *archive.App, cfg config.Config, logger *slog.Logger) error {
-	app.RegisterStorage(storage.NewMemoryStore())
-	logger.Info("registered memory object store")
-
-	if cfg.S3 == nil {
-		return nil
+	for name, storageConfig := range cfg.Storages {
+		var objectStorage storage.ObjectStore
+		switch storageConfig.Type {
+		case storage.MemoryStorageType:
+			objectStorage = storage.NewMemoryStore(name)
+		case storage.S3StorageType:
+			if storageConfig.S3 == nil {
+				return fmt.Errorf("s3 config is required for object storage %q", name)
+			}
+			store, err := storage.NewS3Store(name, *storageConfig.S3)
+			if err != nil {
+				return fmt.Errorf("create object storage %q: %w", name, err)
+			}
+			objectStorage = store
+		default:
+			return fmt.Errorf("unsupported object storage type %q for %q", storageConfig.Type, name)
+		}
+		if err := app.RegisterStorage(objectStorage); err != nil {
+			return err
+		}
+		logger.Info("registered object storage", "name", name, "type", storageConfig.Type)
 	}
-	store, err := storage.NewS3Store(*cfg.S3)
-	if err != nil {
-		return err
-	}
-	app.RegisterStorage(store)
-	logger.Info("registered s3 object store", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint, "region", cfg.S3.Region, "path_style", cfg.S3.UsePathStyle)
 	return nil
 }
